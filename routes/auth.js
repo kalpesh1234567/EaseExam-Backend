@@ -47,4 +47,68 @@ router.post('/login', async (req, res) => {
   }
 });
 
+const crypto = require('crypto');
+const sendEmail = require('../utils/sendEmail');
+
+// POST /api/auth/forgotpassword
+router.post('/forgotpassword', async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.body.email });
+    if (!user) return res.status(404).json({ message: 'There is no user with that email' });
+
+    const resetToken = user.getResetPasswordToken();
+    await user.save({ validateBeforeSave: false });
+
+    // Use environment variable or default to localhost for development
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
+
+    const message = `You are receiving this email because you (or someone else) has requested the reset of a password. Please click on the link below to verify your identity and set a new password:\n\n${resetUrl}\n\nNote: If you did not request this, please ignore this email and your password will remain unchanged.`;
+
+    try {
+      await sendEmail({
+        email: user.email,
+        subject: 'EasyExam Password Reset Token',
+        message
+      });
+      res.status(200).json({ message: 'Email sent successfully' });
+    } catch (err) {
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+      await user.save({ validateBeforeSave: false });
+      res.status(500).json({ message: 'Email could not be sent' });
+    }
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/auth/resetpassword/:resettoken
+router.put('/resetpassword/:resettoken', async (req, res) => {
+  try {
+    const resetPasswordToken = crypto.createHash('sha256').update(req.params.resettoken).digest('hex');
+    
+    const user = await User.findOne({
+      resetPasswordToken,
+      resetPasswordExpire: { $gt: Date.now() }
+    });
+
+    if (!user) return res.status(400).json({ message: 'Invalid or expired token' });
+    if (!req.body.password) return res.status(400).json({ message: 'Password is required' });
+
+    user.password = req.body.password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    await user.save();
+
+    res.status(200).json({
+      message: 'Password correctly updated',
+      token: generateToken(user),
+      user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email, username: user.username, role: user.role }
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
