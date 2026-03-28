@@ -65,19 +65,20 @@ router.post('/forgotpassword', async (req, res) => {
 
     const message = `You are receiving this email because you (or someone else) has requested the reset of a password. Please click on the link below to verify your identity and set a new password:\n\n${resetUrl}\n\nNote: If you did not request this, please ignore this email and your password will remain unchanged.`;
 
-    try {
-      await sendEmail({
-        email: user.email,
-        subject: 'EasyExam Password Reset Token',
-        message
-      });
-      res.status(200).json({ message: 'Email sent successfully' });
-    } catch (err) {
+    // Send email asynchronously in the background to prevent UI delays
+    sendEmail({
+      email: user.email,
+      subject: 'EasyExam Password Reset Token',
+      message
+    }).catch(async (err) => {
+      // Cleanup token if background email fails
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save({ validateBeforeSave: false });
-      res.status(500).json({ message: 'Email could not be sent' });
-    }
+    });
+
+    // Instantly return success to the user interface
+    res.status(200).json({ message: 'Email sent successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
