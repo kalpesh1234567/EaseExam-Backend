@@ -1,12 +1,42 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
+const fs = require('fs');
 const auth = require('../middleware/auth');
+const upload = require('../utils/fileUpload');
+const logger = require('../utils/logger');
+
+// Old test-based models
 const TestSubmission = require('../models/TestSubmission');
 const Answer = require('../models/Answer');
 const Question = require('../models/Question');
 const Test = require('../models/Test');
 const Enrollment = require('../models/Enrollment');
 const { evaluateAnswer } = require('../nlp/engine');
+
+// New exam-based models
+const Exam = require('../models/Exam');
+const AnswerKey = require('../models/AnswerKey');
+const StudentSubmission = require('../models/StudentSubmission');
+const Evaluation = require('../models/Evaluation');
+const QuestionScore = require('../models/QuestionScore');
+const { evaluateSingleAnswer } = require('../nlp/aiEvaluator');
+
+// Helper: extract text from a file (image or PDF)
+async function extractTextFromFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.pdf') {
+    const pdfParse = require('pdf-parse');
+    const buffer = fs.readFileSync(filePath);
+    const data = await pdfParse(buffer);
+    return data.text || '';
+  } else {
+    const Tesseract = require('tesseract.js');
+    const { data } = await Tesseract.recognize(filePath, 'eng');
+    return data.text || '';
+  }
+}
+
 
 // POST /api/submissions/submit/:testId — student submits test
 router.post('/submit/:testId', auth, async (req, res) => {
@@ -56,7 +86,7 @@ router.post('/submit/:testId', auth, async (req, res) => {
 // GET /api/submissions/result/:testId — student gets their result
 router.get('/result/:testId', auth, async (req, res) => {
   try {
-    const test      = await Test.findById(req.params.testId).populate('classroom', 'name');
+    const test = await Test.findById(req.params.testId).populate('classroom', 'name');
     const submission = await TestSubmission.findOne({ test: test._id, student: req.user.id });
     if (!submission) return res.status(404).json({ message: 'Submission not found' });
 
@@ -83,8 +113,8 @@ router.get('/students-work/:testId', auth, async (req, res) => {
     if (test.classroom.owner.toString() !== req.user.id) return res.status(403).json({ message: 'Forbidden' });
 
     const submissions = await TestSubmission.find({ test: test._id }).populate('student', 'firstName lastName username');
-    const questions   = await Question.find({ test: test._id }).sort('order');
-    const totalMarks  = questions.reduce((s, q) => s + q.maxScore, 0);
+    const questions = await Question.find({ test: test._id }).sort('order');
+    const totalMarks = questions.reduce((s, q) => s + q.maxScore, 0);
 
     const result = await Promise.all(submissions.map(async (sub) => {
       const answers = await Answer.find({ submission: sub._id }).populate('question');
@@ -113,7 +143,7 @@ router.patch('/update-score/:answerId', auth, async (req, res) => {
     const submission = await TestSubmission.findById(answer.submission);
     const allAnswers = await Answer.find({ submission: submission._id });
     submission.teacherTotal = Math.round(allAnswers.reduce((s, a) => s + (a.teacherScore !== null ? a.teacherScore : a.mlScore), 0) * 100) / 100;
-    submission.isReviewed   = allAnswers.every(a => a.teacherScore !== null);
+    submission.isReviewed = allAnswers.every(a => a.teacherScore !== null);
     await submission.save();
 
     res.json({ answer, submission });
@@ -121,5 +151,127 @@ router.patch('/update-score/:answerId', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+/**
+ * @swagger
+ * /api/submissions/{examId}:
+ *   post:
+ *     summary: Student uploads answer sheet for an exam
+ *     tags: [Submissions]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: examId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sheetUrl:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       201:
+ *         description: Sheet uploaded and evaluation started
+ */
+router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
+  try {
+    if (req.user.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can submit answer sheets' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded.' });
+    }
+
+    const exam = await Exam.findById(req.params.examId);
+    if (!exam) return res.status(404).json({ message: 'Exam not found' });
+
+    const answerKey = await AnswerKey.findOne({ exam: exam._id });
+    if (!answerKey || !answerKey.questions || answerKey.questions.length === 0) {
+      return res.status(404).json({ message: 'Answer key not configured.' });
+    }
+
+    const existing = await StudentSubmission.findOne({ exam: exam._id, student: req.user.id });
+    if (existing) {
+      return res.status(400).json({ message: 'Already submitted.' });
+    }
+
+    const fileUrl = `/uploads/sheets/${req.file.filename}`;
+    const submission = await StudentSubmission.create({
+      exam: exam._id,
+      student: req.user.id,
+      fileUrl,
+      status: 'pending',
+    });
+
+    res.status(201).json({ message: 'Uploaded. Evaluation in progress...', submissionId: submission._id });
+
+    // Background Evaluation
+    (async () => {
+      try {
+        const absolutePath = path.join(__dirname, '..', req.file.path);
+        const rawText = await extractTextFromFile(absolutePath);
+
+        submission.ocrText = rawText;
+        await submission.save();
+
+        let totalScore = 0;
+        const maxScore = answerKey.questions.reduce((s, q) => s + q.maxMarks, 0);
+
+        const evalDoc = await Evaluation.create({
+          submission: submission._id,
+          totalScore: 0,
+          maxScore,
+          percentage: 0,
+          grade: '',
+          feedbackJson: '',
+        });
+
+        for (const q of answerKey.questions) {
+          const result = await evaluateSingleAnswer(rawText, q.modelAnswer, q.maxMarks);
+          totalScore += result.marksObtained;
+
+          await QuestionScore.create({
+            evaluation: evalDoc._id,
+            questionNo: q.questionNo,
+            marksObtained: result.marksObtained,
+            maxMarks: q.maxMarks,
+            studentAnswer: rawText,
+            feedback: result.feedback,
+            suggestion: result.suggestion,
+          });
+        }
+
+        const percentage = maxScore > 0 ? Math.round((totalScore / maxScore) * 100) : 0;
+        const grade = percentage >= 90 ? 'A+' : percentage >= 80 ? 'A' : percentage >= 70 ? 'B' : percentage >= 60 ? 'C' : percentage >= 50 ? 'D' : 'F';
+
+        evalDoc.totalScore = totalScore;
+        evalDoc.percentage = percentage;
+        evalDoc.grade = grade;
+        evalDoc.feedbackJson = JSON.stringify({ summary: `Scored ${totalScore}/${maxScore}` });
+        await evalDoc.save();
+
+        submission.status = 'evaluated';
+        await submission.save();
+
+      } catch (bgErr) {
+        logger.error('Background eval error:', bgErr);
+        submission.status = 'failed';
+        submission.errorMsg = bgErr.message;
+        await submission.save();
+      }
+    })();
+  } catch (err) {
+    logger.error('Upload error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
 
 module.exports = router;
+
