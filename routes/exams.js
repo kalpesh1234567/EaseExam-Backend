@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const Exam = require('../models/Exam');
+const Classroom = require('../models/Classroom');
+const Enrollment = require('../models/Enrollment');
 const AnswerKey = require('../models/AnswerKey');
 const StudentSubmission = require('../models/StudentSubmission');
 
@@ -26,8 +28,20 @@ const StudentSubmission = require('../models/StudentSubmission');
  */
 router.get('/', auth, async (req, res) => {
   try {
-    const filter = req.user.role === 'teacher' ? { teacher: req.user.id } : {};
-    const exams = await Exam.find(filter).populate('teacher', 'firstName lastName').sort('-createdAt');
+    let filter = {};
+    if (req.user.role === 'teacher') {
+      filter = { teacher: req.user.id };
+    } else {
+      // Find classrooms student is enrolled in
+      const enrollments = await Enrollment.find({ student: req.user.id });
+      const classroomIds = enrollments.map(e => e.classroom);
+      filter = { classroom: { $in: classroomIds } };
+    }
+    
+    const exams = await Exam.find(filter)
+      .populate('teacher', 'firstName lastName')
+      .populate('classroom', 'name')
+      .sort('-createdAt');
     res.json(exams);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -60,8 +74,22 @@ router.get('/', auth, async (req, res) => {
 router.post('/', auth, async (req, res) => {
   try {
     if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Only teachers can create exams' });
-    const { title, subject, maxMarks, description } = req.body;
-    const exam = await Exam.create({ title, subject, maxMarks, description, teacher: req.user.id });
+    const { title, subject, maxMarks, description, classroomId } = req.body;
+
+    if (!classroomId) return res.status(400).json({ message: 'Classroom ID is required' });
+
+    // Verify classroom exists and belongs to the teacher
+    const classroom = await Classroom.findOne({ _id: classroomId, owner: req.user.id });
+    if (!classroom) return res.status(403).json({ message: 'Invalid classroom selection' });
+
+    const exam = await Exam.create({ 
+      title, 
+      subject, 
+      maxMarks, 
+      description, 
+      teacher: req.user.id,
+      classroom: classroom._id 
+    });
     res.status(201).json(exam);
   } catch (err) {
     res.status(500).json({ message: err.message });

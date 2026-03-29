@@ -192,7 +192,14 @@ router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
     const exam = await Exam.findById(req.params.examId);
     if (!exam) return res.status(404).json({ message: 'Exam not found' });
 
+    // Verify student is enrolled in the exam's classroom
+    const enrolled = await Enrollment.findOne({ classroom: exam.classroom, student: req.user.id });
+    if (!enrolled) {
+      return res.status(403).json({ message: 'You are not enrolled in the classroom for this exam.' });
+    }
+
     const answerKey = await AnswerKey.findOne({ exam: exam._id });
+
     if (!answerKey || !answerKey.questions || answerKey.questions.length === 0) {
       return res.status(404).json({ message: 'Answer key not configured.' });
     }
