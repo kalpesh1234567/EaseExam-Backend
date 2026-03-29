@@ -25,6 +25,7 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
 // Routes
 app.use('/api/auth',        require('./routes/auth'));
+app.use('/api/classrooms',  require('./routes/classrooms'));
 app.use('/api/exams',       require('./routes/exams'));
 app.use('/api/answer-keys', require('./routes/answerKey'));
 app.use('/api/submissions', require('./routes/submissions'));
