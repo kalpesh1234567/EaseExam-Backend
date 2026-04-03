@@ -20,7 +20,7 @@ const AnswerKey = require('../models/AnswerKey');
 const StudentSubmission = require('../models/StudentSubmission');
 const Evaluation = require('../models/Evaluation');
 const QuestionScore = require('../models/QuestionScore');
-const { evaluateSingleAnswer } = require('../nlp/aiEvaluator');
+const { segmentAnswerSheet, evaluateSingleAnswer } = require('../nlp/aiEvaluator');
 
 // Helper: extract text from a file (image or PDF)
 async function extractTextFromFile(filePath) {
@@ -219,7 +219,7 @@ router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
 
     res.status(201).json({ message: 'Uploaded. Evaluation in progress...', submissionId: submission._id });
 
-    // Background Evaluation
+    // ── Background Evaluation (Two-Phase) ────────────────────────────────────
     (async () => {
       try {
         const absolutePath = path.join(__dirname, '..', req.file.path);
@@ -228,7 +228,6 @@ router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
         submission.ocrText = rawText;
         await submission.save();
 
-        let totalScore = 0;
         const maxScore = answerKey.questions.reduce((s, q) => s + q.maxMarks, 0);
 
         const evalDoc = await Evaluation.create({
@@ -240,36 +239,68 @@ router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
           feedbackJson: '',
         });
 
+        // ── PHASE 1: Segment the answer sheet into per-question answer chunks ──
+        // One smart Gemini call: full OCR text + all question numbers/texts → JSON map
+        logger.info(`[Eval] Starting segmentation for submission ${submission._id}`);
+        const segments = await segmentAnswerSheet(rawText, answerKey.questions);
+        const segmentCount = Object.keys(segments).filter(k => segments[k]).length;
+        logger.info(`[Eval] Segmented ${segmentCount}/${answerKey.questions.length} questions successfully`);
+
+        // ── PHASE 2: Evaluate each question's specific answer segment ──
+        let totalScore = 0;
+
         for (const q of answerKey.questions) {
-          const result = await evaluateSingleAnswer(rawText, q.modelAnswer, q.maxMarks);
+          const qKey = String(q.questionNo);
+
+          // Use the specific segment if found, otherwise fall back to full OCR text
+          const studentSegment = segments[qKey] && segments[qKey].trim().length > 3
+            ? segments[qKey]
+            : rawText;
+
+          const usedFallback = !segments[qKey] || segments[qKey].trim().length <= 3;
+          if (usedFallback) {
+            logger.warn(`[Eval] Q${q.questionNo}: segment not found, using full OCR text as fallback`);
+          }
+
+          const result = await evaluateSingleAnswer(
+            studentSegment,
+            q.modelAnswer,
+            q.maxMarks,
+            q.text || ''   // pass question text for richer AI context
+          );
+
           totalScore += result.marksObtained;
 
           await QuestionScore.create({
             evaluation: evalDoc._id,
-            questionNo: q.questionNo,
-            marksObtained: result.marksObtained,
-            maxMarks: q.maxMarks,
-            studentAnswer: rawText,
-            feedback: result.feedback,
-            suggestion: result.suggestion,
+            questionNo:      q.questionNo,
+            marksObtained:   result.marksObtained,
+            maxMarks:        q.maxMarks,
+            studentAnswer:   studentSegment,   // specific segment, not full dump
+            feedback:        result.feedback,
+            suggestion:      result.suggestion,
           });
+
+          logger.info(`[Eval] Q${q.questionNo}: ${result.marksObtained}/${q.maxMarks} marks`);
         }
 
         const percentage = maxScore > 0 ? Math.round((totalScore / maxScore) * 100) : 0;
         const grade = percentage >= 90 ? 'A+' : percentage >= 80 ? 'A' : percentage >= 70 ? 'B' : percentage >= 60 ? 'C' : percentage >= 50 ? 'D' : 'F';
 
-        evalDoc.totalScore = totalScore;
-        evalDoc.percentage = percentage;
-        evalDoc.grade = grade;
-        evalDoc.feedbackJson = JSON.stringify({ summary: `Scored ${totalScore}/${maxScore}` });
+        evalDoc.totalScore   = totalScore;
+        evalDoc.percentage   = percentage;
+        evalDoc.grade        = grade;
+        evalDoc.feedbackJson = JSON.stringify({ summary: `Scored ${totalScore}/${maxScore}`, segmentsFound: segmentCount });
         await evalDoc.save();
 
         submission.status = 'evaluated';
         await submission.save();
 
+        logger.info(`[Eval] Done — ${totalScore}/${maxScore} (${percentage}%) Grade: ${grade}`);
+
       } catch (bgErr) {
         logger.error('Background eval error:', bgErr);
-        submission.status = 'failed';
+        submission.status  = 'failed';
         submission.errorMsg = bgErr.message;
         await submission.save();
       }
