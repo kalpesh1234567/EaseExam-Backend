@@ -1,32 +1,28 @@
 const pdfParse = require('pdf-parse');
-const fs = require('fs');
-const { extractTextWithGemini } = require('../nlp/aiEvaluator');
 const logger = require('../utils/logger');
 
 /**
- * Extracts text from a PDF buffer.
- * @param {Buffer} dataBuffer - Buffer of the PDF file.
- * @returns {Promise<string>} - Extracted text content.
+ * Extract text from a PDF buffer using pdf-parse.
+ * Simple and stable — no OCR, no vision models.
+ * Returns empty string if the PDF is scanned (image-only).
  */
 const extractTextFromPDF = async (dataBuffer) => {
-    try {
-        const data = await pdfParse(dataBuffer);
-        let text = data.text || '';
-        
-        // If text is very short/empty, it might be a scanned PDF (images only)
-        if (text.trim().length < 10) {
-            logger.info('Digital PDF extraction yielded little text. Attempting Gemini OCR fallback...');
-            const aiText = await extractTextWithGemini(dataBuffer);
-            if (aiText) text = aiText;
-        }
+  try {
+    const data = await pdfParse(dataBuffer);
+    const text = (data.text || '').trim();
+    logger.info(`[PDF] Extracted ${text.length} chars.`);
 
-        return text;
-    } catch (error) {
-        logger.error('pdf-parse failed, trying Gemini OCR fallback: ' + error.message);
-        return await extractTextWithGemini(dataBuffer);
+    if (text.length < 20) {
+      logger.warn('[PDF] Very little text — PDF is likely scanned (image-only).');
     }
+
+    return text;
+  } catch (error) {
+    logger.error('[PDF] pdf-parse failed: ' + error.message);
+    return '';
+  }
 };
 
 module.exports = {
-    extractTextFromPDF
+  extractTextFromPDF
 };
