@@ -244,37 +244,27 @@ router.post('/:examId', auth, (req, res, next) => {
 // ─── Background evaluation (SIMPLIFIED) ──────────────────────────────────────
 async function runBackgroundEvaluation(submission, answerKey) {
   try {
-    // ── Step 1: Download file and extract text with pdf-parse ─────────────
+    // ── Step 1: Download + OCR the file ──────────────────────────────────────
+    // Pipeline: PDF → render each page to JPEG → vision OCR each page → merge
     let rawText = '';
     const fileUrl = submission.fileUrl;
 
     if (fileUrl.startsWith('http')) {
-      logger.info(`[Eval] Downloading file: ${fileUrl}`);
+      logger.info(`[Eval] Downloading: ${fileUrl}`);
       const response = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30_000 });
       const buffer = Buffer.from(response.data);
 
-      // Strategy: ALWAYS try pdf-parse first (even if MIME says octet-stream).
-      // If pdf-parse returns usable text → done.
-      // If not → try image OCR via OpenRouter vision models.
-      rawText = await extractTextFromBuffer(buffer);
-      logger.info(`[Eval] pdf-parse got ${rawText.length} chars.`);
-
-      if (rawText.length < 30) {
-        logger.info('[Eval] pdf-parse got little text — trying image OCR via vision model…');
-        const ocrText = await extractTextWithGemini(buffer, 'image/jpeg');
-        if (ocrText && ocrText.length > rawText.length) {
-          rawText = ocrText;
-          logger.info(`[Eval] Vision OCR got ${rawText.length} chars.`);
-        }
-      }
+      // extractTextWithGemini handles: render PDF pages → OCR via vision models
+      rawText = await extractTextWithGemini(buffer, 'application/pdf');
+      logger.info(`[Eval] OCR complete: ${rawText.length} chars.`);
     } else {
       // Local file (dev only)
       const absolutePath = path.join(__dirname, '..', fileUrl);
       if (fs.existsSync(absolutePath)) {
         const buffer = fs.readFileSync(absolutePath);
-        rawText = await extractTextFromBuffer(buffer);
+        rawText = await extractTextWithGemini(buffer, 'application/pdf');
       }
-      logger.info(`[Eval] Local file: ${rawText.length} chars.`);
+      logger.info(`[Eval] Local file OCR: ${rawText.length} chars.`);
     }
 
     // Check if we got usable text
