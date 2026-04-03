@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const keyQuestionSchema = new mongoose.Schema({
   questionNo:  { type: Number, required: true },
   text:        { type: String, default: '' },
-  modelAnswer: { type: String, required: true },
+  modelAnswer: { type: String, default: '' },
   maxMarks:    { type: Number, required: true },
 });
 
