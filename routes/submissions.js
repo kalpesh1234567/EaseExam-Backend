@@ -183,11 +183,16 @@ router.patch('/update-score/:answerId', auth, async (req, res) => {
 router.post('/:examId', auth, (req, res, next) => {
   upload.single('sheetUrl')(req, res, (err) => {
     if (err) {
-      logger.error('Multer/Cloudinary Error:', err);
+      // Very detailed logging for the server logs
+      console.error('--- MULTER/CLOUDINARY ERROR DETAILS ---');
+      console.error(err);
+      if (err.name) console.error('Error Name:', err.name);
+      if (err.http_code) console.error('Cloudinary Status:', err.http_code);
+      
       return res.status(500).json({ 
-        message: 'UPLOAD_ERROR: ' + err.message, 
-        details: err.stack,
-        error: err
+        message: 'UPLOAD_ERROR: ' + (err.message || err.name || 'Cloudinary specific issue'), 
+        details: err.stack || JSON.stringify(err, null, 2),
+        errorCode: err.http_code || 500
       });
     }
     next();
