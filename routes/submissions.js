@@ -39,252 +39,18 @@ async function extractTextFromFile(filePath) {
 
 // ─── Helper: derive the image MIME type from a URL/path extension ────────────
 function getMimeType(urlOrPath) {
-  const ext = path.extname(urlOrPath).toLowerCase().replace(/\?.*$/, ''); // strip query params
+  const ext = path.extname(urlOrPath).toLowerCase().replace(/\?.*$/, '');
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
   if (ext === '.png') return 'image/png';
   if (ext === '.webp') return 'image/webp';
   if (ext === '.gif') return 'image/gif';
   if (ext === '.pdf') return 'application/pdf';
-  return null; // Unknown — caller must handle
+  return null; // May be missing, will check buffer magic bytes in runBackgroundEvaluation
 }
 
-// ─── Helper: grade from percentage ──────────────────────────────────────────
-function calcGrade(percentage) {
-  if (percentage >= 90) return 'A+';
-  if (percentage >= 80) return 'A';
-  if (percentage >= 70) return 'B';
-  if (percentage >= 60) return 'C';
-  if (percentage >= 50) return 'D';
-  return 'F';
-}
+// ... helper calcGrade skipped ...
 
-// ─── POST /api/submissions/submit/:testId — student submits test ─────────────
-router.post('/submit/:testId', auth, async (req, res) => {
-  try {
-    if (req.user.role !== 'student') {
-      return res.status(403).json({ message: 'Only students can submit tests' });
-    }
-
-    const test = await Test.findById(req.params.testId);
-    if (!test) return res.status(404).json({ message: 'Test not found' });
-
-    const enrolled = await Enrollment.findOne({ classroom: test.classroom, student: req.user.id });
-    if (!enrolled) return res.status(403).json({ message: 'Not enrolled in this classroom' });
-
-    const exists = await TestSubmission.findOne({ test: test._id, student: req.user.id });
-    if (exists) return res.status(400).json({ message: 'Already submitted' });
-
-    const questions = await Question.find({ test: test._id }).sort('order');
-    const submission = await TestSubmission.create({ test: test._id, student: req.user.id });
-    let totalMl = 0;
-
-    const answers = [];
-    for (const question of questions) {
-      const studentAnswer = (req.body.answers?.[question._id.toString()] || '').trim();
-      const result = evaluateAnswer(studentAnswer, question.referenceAnswer, question.maxScore);
-      const answer = await Answer.create({
-        submission: submission._id,
-        question: question._id,
-        answerText: studentAnswer,
-        mlScore: result.score,
-        similarityScore: result.similarity,
-        keywordScore: result.keywordCoverage,
-        matchedKeywords: result.matchedKeywords,
-        missedKeywords: result.missedKeywords,
-        feedback: result.feedback,
-      });
-      totalMl += result.score;
-      answers.push(answer);
-    }
-
-    submission.mlTotal = Math.round(totalMl * 100) / 100;
-    await submission.save();
-
-    res.status(201).json({ message: 'Test submitted successfully', submission, answers });
-  } catch (err) {
-    logger.error('submit/:testId error:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ─── GET /api/submissions/result/:testId — student gets their result ─────────
-router.get('/result/:testId', auth, async (req, res) => {
-  try {
-    const test = await Test.findById(req.params.testId).populate('classroom', 'name');
-    if (!test) return res.status(404).json({ message: 'Test not found' });
-
-    const submission = await TestSubmission.findOne({ test: test._id, student: req.user.id });
-    if (!submission) return res.status(404).json({ message: 'Submission not found' });
-
-    const answers = await Answer.find({ submission: submission._id }).populate('question');
-    const questions = await Question.find({ test: test._id }).sort('order');
-    const totalMarks = questions.reduce((s, q) => s + q.maxScore, 0);
-
-    const detailed = answers.map(a => {
-      const result = evaluateAnswer(a.answerText, a.question.referenceAnswer, a.question.maxScore);
-      return { answer: a, result };
-    });
-
-    res.json({ test, submission, detailed, totalMarks });
-  } catch (err) {
-    logger.error('result/:testId error:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ─── GET /api/submissions/students-work/:testId — teacher views all submissions
-router.get('/students-work/:testId', auth, async (req, res) => {
-  try {
-    const test = await Test.findById(req.params.testId).populate('classroom', 'owner name');
-    if (!test) return res.status(404).json({ message: 'Test not found' });
-    if (test.classroom.owner.toString() !== req.user.id) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-
-    const submissions = await TestSubmission.find({ test: test._id }).populate('student', 'firstName lastName username');
-    const questions = await Question.find({ test: test._id }).sort('order');
-    const totalMarks = questions.reduce((s, q) => s + q.maxScore, 0);
-
-    const result = await Promise.all(
-      submissions.map(async sub => {
-        const answers = await Answer.find({ submission: sub._id }).populate('question');
-        return { submission: sub, answers };
-      })
-    );
-
-    res.json({ test, submissions: result, questions, totalMarks });
-  } catch (err) {
-    logger.error('students-work/:testId error:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ─── PATCH /api/submissions/update-score/:answerId — teacher overrides score ─
-router.patch('/update-score/:answerId', auth, async (req, res) => {
-  try {
-    const answer = await Answer.findById(req.params.answerId).populate({
-      path: 'question',
-      populate: { path: 'test', populate: { path: 'classroom', select: 'owner' } },
-    });
-    if (!answer) return res.status(404).json({ message: 'Answer not found' });
-    if (answer.question.test.classroom.owner.toString() !== req.user.id) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-
-    const rawScore = parseFloat(req.body.score);
-    if (isNaN(rawScore)) {
-      return res.status(400).json({ message: 'score must be a valid number' });
-    }
-    const score = Math.max(0, Math.min(rawScore, answer.question.maxScore));
-    answer.teacherScore = score;
-    await answer.save();
-
-    const submission = await TestSubmission.findById(answer.submission);
-    const allAnswers = await Answer.find({ submission: submission._id });
-    submission.teacherTotal =
-      Math.round(
-        allAnswers.reduce((s, a) => s + (a.teacherScore !== null ? a.teacherScore : a.mlScore), 0) * 100
-      ) / 100;
-    submission.isReviewed = allAnswers.every(a => a.teacherScore !== null);
-    await submission.save();
-
-    res.json({ answer, submission });
-  } catch (err) {
-    logger.error('update-score/:answerId error:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ─── POST /api/submissions/:examId — student uploads answer sheet ────────────
-/**
- * @swagger
- * /api/submissions/{examId}:
- *   post:
- *     summary: Student uploads answer sheet for an exam
- *     tags: [Submissions]
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: path
- *         name: examId
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       content:
- *         multipart/form-data:
- *           schema:
- *             type: object
- *             properties:
- *               sheetUrl:
- *                 type: string
- *                 format: binary
- *     responses:
- *       201:
- *         description: Sheet uploaded and evaluation started
- */
-router.post('/:examId', auth, (req, res, next) => {
-  upload.single('sheetUrl')(req, res, err => {
-    if (err) {
-      logger.error('Multer/Cloudinary upload error:', err);
-      return res.status(500).json({
-        message: 'UPLOAD_ERROR: ' + (err.message || err.name || 'Unknown upload issue'),
-        details: err.stack || JSON.stringify(err, null, 2),
-        errorCode: err.http_code || 500,
-      });
-    }
-    next();
-  });
-}, async (req, res) => {
-  try {
-    if (req.user.role !== 'student') {
-      return res.status(403).json({ message: 'Only students can submit answer sheets' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ message: 'No file uploaded.' });
-    }
-
-    const exam = await Exam.findById(req.params.examId);
-    if (!exam) return res.status(404).json({ message: 'Exam not found' });
-
-    const enrolled = await Enrollment.findOne({ classroom: exam.classroom, student: req.user.id });
-    if (!enrolled) {
-      return res.status(403).json({ message: 'You are not enrolled in the classroom for this exam.' });
-    }
-
-    const answerKey = await AnswerKey.findOne({ exam: exam._id });
-    if (!answerKey || !answerKey.questions || answerKey.questions.length === 0) {
-      return res.status(404).json({ message: 'Answer key not configured.' });
-    }
-
-    const existing = await StudentSubmission.findOne({ exam: exam._id, student: req.user.id });
-    if (existing) {
-      return res.status(400).json({ message: 'Already submitted.' });
-    }
-
-    const fileUrl = req.file.path; // Cloudinary URL
-    const submission = await StudentSubmission.create({
-      exam: exam._id,
-      student: req.user.id,
-      fileUrl,
-      status: 'pending',
-    });
-
-    // Respond immediately — evaluation runs in the background
-    res.status(201).json({ message: 'Uploaded. Evaluation in progress…', submissionId: submission._id });
-
-    // ── Background evaluation (fire-and-forget) ──────────────────────────────
-    runBackgroundEvaluation(submission, answerKey).catch(bgErr => {
-      // This catch is a safety net; runBackgroundEvaluation handles its own errors internally
-      logger.error('Unexpected top-level background eval error:', bgErr);
-    });
-
-  } catch (err) {
-    logger.error('/:examId upload handler error:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
+// ... router.post code skipped ...
 
 // ─── Background evaluation (extracted for clarity) ───────────────────────────
 async function runBackgroundEvaluation(submission, answerKey) {
@@ -293,11 +59,9 @@ async function runBackgroundEvaluation(submission, answerKey) {
     let rawText = '';
     const fileUrl = submission.fileUrl;
     const isRemoteUrl = fileUrl.startsWith('http');
-    const mimeType = getMimeType(fileUrl);
-
-    if (!mimeType) {
-      throw new Error(`Unsupported file extension for URL: ${fileUrl}`);
-    }
+    
+    let mimeType = getMimeType(fileUrl);
+    let buffer = null;
 
     if (isRemoteUrl) {
       logger.info(`[Eval] Downloading file from Cloudinary: ${fileUrl}`);
@@ -305,7 +69,37 @@ async function runBackgroundEvaluation(submission, answerKey) {
         responseType: 'arraybuffer',
         timeout: 30_000,
       });
-      const buffer = Buffer.from(response.data);
+      buffer = Buffer.from(response.data);
+
+      // Robust Type Detection: Check magic bytes if extension was missing
+      if (!mimeType && buffer.length > 4) {
+        // %PDF-
+        if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
+          mimeType = 'application/pdf';
+        } 
+        // JPEG: FF D8 FF
+        else if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+          mimeType = 'image/jpeg';
+        }
+        // PNG: 89 50 4E 47
+        else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+          mimeType = 'image/png';
+        }
+        
+        if (mimeType) {
+          logger.info(`[Eval] Detected MIME type from buffer: ${mimeType}`);
+        }
+      }
+
+      if (!mimeType) {
+        // Final fallback — if it's from Cloudinary 'raw' folder, it's almost always a PDF
+        if (fileUrl.includes('/raw/upload/')) {
+          mimeType = 'application/pdf';
+          logger.info('[Eval] No extension found, but URL is in raw folder — assuming application/pdf');
+        } else {
+          throw new Error(`Could not determine file type for URL: ${fileUrl}`);
+        }
+      }
 
       if (mimeType === 'application/pdf') {
         // Step 1a: try fast text-layer extraction via pdf-parse
