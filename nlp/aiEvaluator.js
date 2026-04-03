@@ -92,52 +92,49 @@ async function callOpenRouter(model, messages, expectJson = false, maxRetries = 
 // ─── Phase 0: OCR ────────────────────────────────────────────────────────────
 
 /**
- * Extract text from an image buffer using OpenRouter vision model.
- *
- * IMPORTANT: This only works for IMAGE files (jpeg, png, webp, gif).
- * PDFs must be parsed with pdf-parse first (see submission.js).
- * Supported mimeTypes: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'
+ * Extract text from an image buffer using OpenRouter vision models.
+ * Uses a prioritized fallback list to ensure "instant" recovery if a free model is down (404).
  */
 async function extractTextFromImage(buffer, mimeType = 'image/jpeg') {
   const supportedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
   if (!supportedImageTypes.includes(mimeType)) {
-    throw new Error(
-      `extractTextFromImage only supports image files. Received: "${mimeType}". ` +
-      'For PDFs, use pdf-parse in the calling code before invoking this function.'
-    );
+    throw new Error(`extractTextFromImage only supports images. Received: "${mimeType}".`);
   }
 
-  logger.info(`Starting OpenRouter vision OCR for ${mimeType}.`);
+  // Prioritized list of active FREE vision models on OpenRouter
+  const visionModels = [
+    'google/gemini-flash-1.5-exp:free',
+    'meta-llama/llama-3.2-11b-vision-instruct:free',
+    'qwen/qwen2.5-vl-72b-instruct:free',
+    'qwen/qwen-2-vl-72b-instruct:free',
+    'mistralai/pixtral-12b:free'
+  ];
 
   const base64Data = buffer.toString('base64');
   const dataUrl = `data:${mimeType};base64,${base64Data}`;
+  const messages = [{
+    role: 'user',
+    content: [
+      { type: 'text', text: 'Read this image and extract ALL handwritten or typed text exactly. Do not add commentary.' },
+      { type: 'image_url', image_url: { url: dataUrl } },
+    ],
+  }];
 
-  const messages = [
-    {
-      role: 'user',
-      content: [
-        {
-          type: 'text',
-          text:
-            'Please read this image carefully and extract ALL handwritten or typed text exactly as it appears. ' +
-            'Preserve paragraph structure. Do not add any commentary — output only the extracted text.',
-        },
-        {
-          type: 'image_url',
-          image_url: { url: dataUrl },
-        },
-      ],
-    },
-  ];
-
-  try {
-    const text = await callOpenRouter('qwen/qwen-2-vl-72b-instruct:free', messages);
-    logger.info('Vision OCR completed successfully.');
-    return text.trim();
-  } catch (err) {
-    logger.error('Vision OCR failed:', err.message);
-    return ''; // OCR failure is non-fatal — submission.js falls back gracefully
+  for (const model of visionModels) {
+    try {
+      logger.info(`Attempting Vision OCR with ${model}...`);
+      const text = await callOpenRouter(model, messages, false, 0); // Disable internal retries to swap models faster
+      if (text && text.trim().length > 0) {
+        logger.info(`Vision OCR SUCCESS with ${model}.`);
+        return text.trim();
+      }
+    } catch (err) {
+      logger.warn(`Vision OCR failed for ${model}: ${err.message}. Trying next fallback...`);
+    }
   }
+
+  logger.error('CRITICAL: All Vision OCR fallback models failed.');
+  return '';
 }
 
 // Keep the old export name so submission.js import doesn't break
