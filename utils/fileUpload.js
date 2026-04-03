@@ -3,13 +3,15 @@ const path   = require('path');
 const fs     = require('fs');
 
 // Ensure upload dirs exist
-['uploads/sheets', 'uploads/keys'].forEach(dir => {
+['uploads/sheets', 'uploads/keys', 'uploads/papers'].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dest = file.fieldname === 'answerKey' ? 'uploads/keys' : 'uploads/sheets';
+    let dest = 'uploads/sheets';
+    if (file.fieldname === 'answerKey') dest = 'uploads/keys';
+    else if (file.fieldname === 'questionPaper') dest = 'uploads/papers';
     cb(null, dest);
   },
   filename: (req, file, cb) => {

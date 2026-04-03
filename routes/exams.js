@@ -1,43 +1,24 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const upload = require('../utils/fileUpload');
 const Exam = require('../models/Exam');
 const Classroom = require('../models/Classroom');
 const Enrollment = require('../models/Enrollment');
 const AnswerKey = require('../models/AnswerKey');
 const StudentSubmission = require('../models/StudentSubmission');
 
-/**
- * @swagger
- * tags:
- *   name: Exams
- *   description: Exam management
- */
-
-/**
- * @swagger
- * /api/exams:
- *   get:
- *     summary: Get all exams (Teacher gets own, Student gets all available)
- *     tags: [Exams]
- *     security:
- *       - BearerAuth: []
- *     responses:
- *       200:
- *         description: List of exams
- */
+// GET /api/exams — Teacher gets own exams, Student gets enrolled classroom exams
 router.get('/', auth, async (req, res) => {
   try {
     let filter = {};
     if (req.user.role === 'teacher') {
       filter = { teacher: req.user.id };
     } else {
-      // Find classrooms student is enrolled in
       const enrollments = await Enrollment.find({ student: req.user.id });
       const classroomIds = enrollments.map(e => e.classroom);
       filter = { classroom: { $in: classroomIds } };
     }
-    
     const exams = await Exam.find(filter)
       .populate('teacher', 'firstName lastName')
       .populate('classroom', 'name')
@@ -48,72 +29,24 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-/**
- * @swagger
- * /api/exams:
- *   post:
- *     summary: Create a new exam
- *     tags: [Exams]
- *     security:
- *       - BearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               title: { type: string }
- *               subject: { type: string }
- *               maxMarks: { type: number }
- *               description: { type: string }
- *     responses:
- *       201:
- *         description: Exam created
- */
+// POST /api/exams — Create a new exam (teacher only)
 router.post('/', auth, async (req, res) => {
   try {
     if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Only teachers can create exams' });
     const { title, subject, maxMarks, description, classroomId } = req.body;
-
     if (!classroomId) return res.status(400).json({ message: 'Classroom ID is required' });
 
-    // Verify classroom exists and belongs to the teacher
     const classroom = await Classroom.findOne({ _id: classroomId, owner: req.user.id });
     if (!classroom) return res.status(403).json({ message: 'Invalid classroom selection' });
 
-    const exam = await Exam.create({ 
-      title, 
-      subject, 
-      maxMarks, 
-      description, 
-      teacher: req.user.id,
-      classroom: classroom._id 
-    });
+    const exam = await Exam.create({ title, subject, maxMarks, description, teacher: req.user.id, classroom: classroom._id });
     res.status(201).json(exam);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-/**
- * @swagger
- * /api/exams/{id}:
- *   get:
- *     summary: Get exam details
- *     tags: [Exams]
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Exam details
- */
+// GET /api/exams/:id — Get exam details with answer key & submission info
 router.get('/:id', auth, async (req, res) => {
   try {
     const exam = await Exam.findById(req.params.id).populate('teacher', 'firstName lastName');
@@ -132,6 +65,40 @@ router.get('/:id', auth, async (req, res) => {
     }
 
     res.json({ exam, hasAnswerKey: !!key, answerKey: isOwner ? key : null, isOwner, submissionCount, submission });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /api/exams/:id/question-paper — Upload question paper PDF (teacher only)
+router.post('/:id/question-paper', auth, upload.single('questionPaper'), async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Only teachers can upload question papers' });
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded. Please attach a PDF.' });
+
+    const exam = await Exam.findOne({ _id: req.params.id, teacher: req.user.id });
+    if (!exam) return res.status(404).json({ message: 'Exam not found or forbidden' });
+
+    exam.questionPaperUrl = `/uploads/papers/${req.file.filename}`;
+    await exam.save();
+
+    res.json({ message: 'Question paper uploaded successfully', questionPaperUrl: exam.questionPaperUrl });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/exams/:id/question-paper — Remove question paper (teacher only)
+router.delete('/:id/question-paper', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+
+    const exam = await Exam.findOne({ _id: req.params.id, teacher: req.user.id });
+    if (!exam) return res.status(404).json({ message: 'Exam not found or forbidden' });
+
+    exam.questionPaperUrl = '';
+    await exam.save();
+    res.json({ message: 'Question paper removed' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
