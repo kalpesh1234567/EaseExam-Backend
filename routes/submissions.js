@@ -180,7 +180,19 @@ router.patch('/update-score/:answerId', auth, async (req, res) => {
  *       201:
  *         description: Sheet uploaded and evaluation started
  */
-router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
+router.post('/:examId', auth, (req, res, next) => {
+  upload.single('sheetUrl')(req, res, (err) => {
+    if (err) {
+      logger.error('Multer/Cloudinary Error:', err);
+      return res.status(500).json({ 
+        message: 'UPLOAD_ERROR: ' + err.message, 
+        details: err.stack,
+        error: err
+      });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     if (req.user.role !== 'student') {
       return res.status(403).json({ message: 'Only students can submit answer sheets' });

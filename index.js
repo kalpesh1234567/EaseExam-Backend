@@ -70,8 +70,9 @@ const startServer = async () => {
     app.use((err, req, res, next) => {
       logger.error('Unhandled ERROR:', err);
       res.status(err.status || 500).json({ 
-        message: err.message || 'Server Error', 
-        error: process.env.NODE_ENV === 'development' ? err : undefined 
+        message: err.message || 'Server Internal Error', 
+        details: err.stack, // Temporarily include stack for debugging
+        error: err
       });
     });
 
