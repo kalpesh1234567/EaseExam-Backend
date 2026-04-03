@@ -349,33 +349,35 @@ async function runBackgroundEvaluation(submission, answerKey) {
 
         // Step 1b: if text layer is empty/too short, it's a scanned PDF.
         // We cannot send a raw PDF to a vision model — vision APIs only accept images.
-        // Attempt to render the first page as a JPEG using pdf-to-img (optional dep).
-        // If that package is unavailable, log clearly and continue with empty text.
+        // Attempt to render each page as a JPEG using pdf-img-convert (reliable cloud-ready library).
         if (rawText.length < 50) {
           logger.info('[Eval] Short PDF text — attempting page-image render for vision OCR…');
           try {
-            // pdf-to-img renders each page as a Buffer (JPEG by default).
-            // Install with: npm install pdf-to-img
-            const { pdf } = require('pdf-to-img');
-            const pages = [];
-            for await (const pageImage of pdf(buffer, { scale: 2 })) {
-              pages.push(pageImage);
-            }
-            if (pages.length > 0) {
-              // Run OCR on all pages and concatenate
+            // pdf-img-convert returns an array of UInt8Arrays (the images)
+            const convert = require('pdf-img-convert');
+            const pageImages = await convert.convert(buffer, {
+              width: 1200, // Higher res for better OCR
+              format: 'jpeg'
+            });
+
+            if (pageImages && pageImages.length > 0) {
+              // Run OCR on each page buffer and concatenate
+              logger.info(`[Eval] Rendering ${pageImages.length} page(s) as images for OCR.`);
               const pageTexts = await Promise.all(
-                pages.map(pageBuffer => extractTextWithGemini(pageBuffer, 'image/jpeg'))
+                pageImages.map((pageBuf, index) => {
+                  logger.info(`[Eval] Starting Vision OCR for page ${index + 1}...`);
+                  const nodeBuffer = Buffer.from(pageBuf);
+                  return extractTextWithGemini(nodeBuffer, 'image/jpeg');
+                })
               );
               rawText = pageTexts.filter(Boolean).join('\n\n');
-              logger.info(`[Eval] Vision OCR across ${pages.length} page(s): ${rawText.length} chars.`);
+              logger.info(`[Eval] Vision OCR across ${pageImages.length} page(s): ${rawText.length} chars.`);
             } else {
-              logger.warn('[Eval] pdf-to-img returned 0 pages.');
+              logger.warn('[Eval] pdf-img-convert returned 0 pages.');
             }
           } catch (renderErr) {
-            logger.warn(
-              '[Eval] pdf-to-img not available or failed. Scanned PDF will have empty OCR text.',
-              renderErr.message
-            );
+            logger.error('[Eval] PDF-to-Image conversion CRITICAL FAILURE:', renderErr.message);
+            logger.error(renderErr.stack);
             // rawText stays empty — evaluation will still run, scoring 0 with
             // a clear "no answer found" feedback for each question.
           }
