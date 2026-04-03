@@ -18,7 +18,7 @@ function extractJson(text) {
   return null;
 }
 
-// ─── OpenRouter text models (for segmentation + evaluation) ──────────────────
+// ─── OpenRouter text models (segmentation + evaluation) ──────────────────────
 
 const TEXT_MODELS = [
   'meta-llama/llama-3-8b-instruct:free',
@@ -57,64 +57,45 @@ async function callOpenRouter(messages, expectJson = false) {
   throw new Error('All OpenRouter text models failed.');
 }
 
-// ─── OpenRouter vision models (for image OCR) ────────────────────────────────
-
-const VISION_MODELS = [
-  'google/gemini-flash-1.5-exp:free',
-  'meta-llama/llama-3.2-11b-vision-instruct:free',
-  'qwen/qwen2.5-vl-72b-instruct:free',
-];
+// ─── Image OCR via Gemini 1.5 Flash (direct REST API) ────────────────────────
+// Using GEMINI_API_KEY from .env — reliable, free tier, great at handwriting OCR.
 
 async function ocrImageBuffer(imageBuffer, mimeType = 'image/jpeg') {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY is missing.');
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY is missing.');
 
-  const dataUrl = `data:${mimeType};base64,${imageBuffer.toString('base64')}`;
-  const messages = [{
-    role: 'user',
-    content: [
-      { type: 'text', text: 'Read this image and extract ALL handwritten or typed text exactly as written. Do not add commentary.' },
-      { type: 'image_url', image_url: { url: dataUrl } },
-    ],
-  }];
+  const base64Data = imageBuffer.toString('base64');
 
-  for (const model of VISION_MODELS) {
-    try {
-      logger.info(`[OCR] Trying vision model: ${model}`);
-      const res = await axios.post(
-        'https://openrouter.ai/api/v1/chat/completions',
-        { model, messages, temperature: 0.1 },
-        {
-          timeout: 60_000,
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://github.com/kalpesh1234567/EaseExam',
-            'X-Title': 'EaseExam ASAE',
-          },
-        }
-      );
-      const text = res.data?.choices?.[0]?.message?.content ?? '';
-      if (text.trim().length > 0) {
-        logger.info(`[OCR] ${model} success: ${text.length} chars.`);
-        return text.trim();
-      }
-    } catch (err) {
-      logger.warn(`[OCR] ${model} failed (${err.response?.status ?? err.message}). Trying next…`);
+  try {
+    logger.info(`[OCR] Sending ${imageBuffer.length} bytes to Gemini 1.5 Flash…`);
+    const res = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        contents: [{
+          parts: [
+            { text: 'Read this image and extract ALL handwritten or typed text exactly as written. Output only the extracted text, no commentary.' },
+            { inline_data: { mime_type: mimeType, data: base64Data } },
+          ],
+        }],
+        generationConfig: { temperature: 0.1 },
+      },
+      { timeout: 60_000, headers: { 'Content-Type': 'application/json' } }
+    );
+
+    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    if (text.trim().length > 0) {
+      logger.info(`[OCR] Gemini success: ${text.length} chars.`);
+      return text.trim();
     }
+    logger.warn('[OCR] Gemini returned empty response.');
+    return '';
+  } catch (err) {
+    logger.error(`[OCR] Gemini failed (${err.response?.status ?? err.message}):`, err.response?.data ?? '');
+    return '';
   }
-
-  logger.error('[OCR] All vision models failed for this page.');
-  return '';
 }
 
-// ─── Core: PDF → images → OCR ────────────────────────────────────────────────
-//
-// Pipeline for scanned PDFs (which is always the case):
-//   1. Use pdfjs-dist to render each page to a JPEG buffer
-//   2. Send each JPEG to a vision model on OpenRouter
-//   3. Merge all page texts and return
-//
+// ─── Core: Scanned PDF → render pages → OCR each page ───────────────────────
 // pdfjs-dist + @napi-rs/canvas are already in package.json.
 
 async function extractTextFromScannedPDF(pdfBuffer) {
@@ -134,13 +115,13 @@ async function extractTextFromScannedPDF(pdfBuffer) {
 
     for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
       const page = await pdfDoc.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 2.0 }); // ~150dpi on A4
+      const viewport = page.getViewport({ scale: 2.0 });
       const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
       const ctx = canvas.getContext('2d');
 
       await page.render({ canvasContext: ctx, viewport }).promise;
       const jpegBuffer = await canvas.encode('jpeg', 90);
-      logger.info(`[OCR] Page ${pageNum}/${pdfDoc.numPages}: ${jpegBuffer.length} bytes → vision OCR`);
+      logger.info(`[OCR] Page ${pageNum}/${pdfDoc.numPages}: ${jpegBuffer.length} bytes → Gemini OCR`);
 
       const pageText = await ocrImageBuffer(jpegBuffer, 'image/jpeg');
       if (pageText) pageTexts.push(pageText);
@@ -149,7 +130,7 @@ async function extractTextFromScannedPDF(pdfBuffer) {
     }
 
     const merged = pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
-    logger.info(`[OCR] Total extracted: ${merged.length} chars from ${pdfDoc.numPages} pages.`);
+    logger.info(`[OCR] Total: ${merged.length} chars from ${pdfDoc.numPages} pages.`);
     return merged;
 
   } catch (err) {
@@ -159,30 +140,24 @@ async function extractTextFromScannedPDF(pdfBuffer) {
 }
 
 // ─── Public: extract text from any file buffer ───────────────────────────────
-// Always treats as scanned PDF → renders pages → vision OCR.
-// Falls back to pdf-parse text layer if rendering fails.
 
 async function extractTextWithGemini(buffer, mimeType) {
-  // For image files uploaded directly (jpg/png) → OCR directly
   const imageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
   if (imageTypes.includes(mimeType)) {
     return ocrImageBuffer(buffer, mimeType);
   }
 
-  // For PDFs (or unknown/octet-stream from Cloudinary) → render pages → OCR
-  logger.info('[Extract] Rendering PDF pages to images for OCR…');
+  // PDF or unknown (scanned) → render pages → Gemini OCR
+  logger.info('[Extract] Rendering PDF pages → Gemini OCR…');
   const ocrText = await extractTextFromScannedPDF(buffer);
 
-  // Fallback: if rendering fails, try plain text layer
   if (!ocrText || ocrText.trim().length < 20) {
-    logger.warn('[Extract] Page rendering failed or no text — trying pdf-parse text layer…');
+    logger.warn('[Extract] Page render got no text — trying pdf-parse text layer…');
     try {
       const pdfParse = require('pdf-parse');
       const data = await pdfParse(buffer);
       return (data.text || '').trim();
-    } catch (_) {
-      return '';
-    }
+    } catch (_) { return ''; }
   }
 
   return ocrText;
