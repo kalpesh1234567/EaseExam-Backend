@@ -66,6 +66,57 @@ router.post('/:examId', auth, upload.single('answerKey'), async (req, res) => {
     }
 
     const key = await AnswerKey.create({ exam: exam._id, fileUrl, questions });
+
+    // Background Auto-Fill: If some model answers are empty and a file was uploaded
+    const needsAutoFill = fileUrl && (questions.some(q => !q.modelAnswer || q.modelAnswer.trim().length === 0));
+
+    if (needsAutoFill) {
+      (async () => {
+        try {
+          const axios = require('axios');
+          const path = require('path');
+          const { extractTextWithGemini, autoExtractAnswerKey } = require('../nlp/aiEvaluator');
+
+          // 1. Download file from Cloudinary 
+          const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+          const buffer = Buffer.from(response.data);
+
+          // 2. OCR based on file extension
+          const ext = path.extname(fileUrl).toLowerCase();
+          let ocrText = '';
+
+          if (ext === '.pdf') {
+            try {
+              const pdfParse = require('pdf-parse');
+              const data = await pdfParse(buffer);
+              ocrText = (data.text || '').trim();
+              if (ocrText.length < 50) {
+                 logger.info('[AutoFill] Scanned PDF detected, using Vision OCR...');
+                 ocrText = await extractTextWithGemini(buffer, 'application/pdf');
+              }
+            } catch (e) {
+              ocrText = await extractTextWithGemini(buffer, 'application/pdf');
+            }
+          } else {
+            const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+            ocrText = await extractTextWithGemini(buffer, mimeType);
+          }
+
+          // 3. AI Structure Extraction
+          if (ocrText && ocrText.length > 20) {
+            const updatedQuestions = await autoExtractAnswerKey(ocrText, questions);
+            
+            // 4. Update the AnswerKey document
+            key.questions = updatedQuestions;
+            await key.save();
+            logger.info(`[AutoFill] Successfully auto-extracted answer key for exam ${exam._id}.`);
+          }
+        } catch (fillErr) {
+          logger.error('[AutoFill] Failed to auto-extract answer key:', fillErr.message);
+        }
+      })();
+    }
+
     res.status(201).json(key);
   } catch (err) {
     logger.error('AnswerKey upload failed:', err);

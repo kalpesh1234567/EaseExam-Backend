@@ -225,4 +225,74 @@ Return ONLY a valid JSON object with the following exact format:
 
 // Keeping the function name 'extractTextWithGemini' so we do not have to rewrite submission.js 
 // We will just rename it underneath, but export it as is.
-module.exports = { segmentAnswerSheet, evaluateSingleAnswer, extractTextWithGemini };
+/**
+ * NEW: Auto-Extract structured model answers from a teacher's Answer Key OCR text.
+ * Maps the unstructured OCR text to the predefined question numbers.
+ */
+async function autoExtractAnswerKey(ocrText, questions) {
+  if (!ocrText || ocrText.trim().length < 20) {
+    logger.warn('OCR text too short for answer key extraction.');
+    return questions;
+  }
+
+  const questionList = questions
+    .map(q => `Q${q.questionNo}${q.text ? `: ${q.text}` : ''}`)
+    .join('\n');
+
+  const prompt = `
+You are an expert at extracting structured information from academic answer keys.
+
+Below is the OCR text of an official Answer Key.
+Your goal is to extract the CORRECT model answer (or key points) for each question number listed below.
+
+Questions to identify:
+${questionList}
+
+OCR Text from Answer Key:
+"""
+${ocrText}
+"""
+
+Return a JSON array of objects with the exact structure:
+[
+  { "questionNo": 1, "modelAnswer": "..." },
+  { "questionNo": 2, "modelAnswer": "..." }
+]
+
+IMPORTANT:
+- Only return the JSON array, nothing else.
+- If an answer is multi-line, preserve the important key points.
+- If no answer is found for a question, use empty string "".
+`;
+
+  const text = await callOpenRouter(
+    'meta-llama/llama-3-8b-instruct:free',
+    [{ role: 'user', content: prompt }],
+    true
+  );
+
+  if (!text) return questions;
+
+  try {
+    const jsonStr = text.match(/\[[\s\S]*\]/)?.[0] || text;
+    const extracted = JSON.parse(jsonStr);
+
+    // Map the extracted answers back to the original questions array
+    const updatedQuestions = questions.map(q => {
+      const match = extracted.find(e => Number(e.questionNo) === Number(q.questionNo));
+      return {
+        ...q,
+        modelAnswer: q.modelAnswer && q.modelAnswer.trim().length > 0
+          ? q.modelAnswer // Keep teacher's manual entry if it exists
+          : (match && match.modelAnswer ? match.modelAnswer.trim() : '')
+      };
+    });
+
+    return updatedQuestions;
+  } catch (err) {
+    logger.error('Failed to parse auto-extracted answer key JSON:', err.message);
+    return questions;
+  }
+}
+
+module.exports = { segmentAnswerSheet, evaluateSingleAnswer, extractTextWithGemini, autoExtractAnswerKey };
