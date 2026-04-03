@@ -65,6 +65,15 @@ const startServer = async () => {
     app.get('/api/health', (req, res) => res.json({ status: 'ok', msg: 'ASAE Production API running' }));
 
     app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
+    
+    // Global Error Handler
+    app.use((err, req, res, next) => {
+      logger.error('Unhandled ERROR:', err);
+      res.status(err.status || 500).json({ 
+        message: err.message || 'Server Error', 
+        error: process.env.NODE_ENV === 'development' ? err : undefined 
+      });
+    });
 
     const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
