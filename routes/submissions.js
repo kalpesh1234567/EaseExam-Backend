@@ -22,9 +22,9 @@ const AnswerKey = require('../models/AnswerKey');
 const StudentSubmission = require('../models/StudentSubmission');
 const Evaluation = require('../models/Evaluation');
 const QuestionScore = require('../models/QuestionScore');
-const { segmentAnswerSheet, evaluateSingleAnswer } = require('../nlp/aiEvaluator');
+const { segmentAnswerSheet, evaluateSingleAnswer, extractTextWithGemini } = require('../nlp/aiEvaluator');
 
-// ─── Helper: extract text from a PDF buffer (simple, no OCR) ────────────────
+// ─── Helper: extract text from a PDF buffer ─────────────────────────────────
 async function extractTextFromBuffer(buffer) {
   try {
     const data = await pdfParse(buffer);
@@ -253,22 +253,24 @@ async function runBackgroundEvaluation(submission, answerKey) {
       const response = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30_000 });
       const buffer = Buffer.from(response.data);
 
-      // Use pdf-parse for PDFs, skip images (no OCR in minimal mode)
-      const contentType = (response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-      const isPDF = contentType === 'application/pdf' || fileUrl.toLowerCase().includes('.pdf');
+      // Strategy: ALWAYS try pdf-parse first (even if MIME says octet-stream).
+      // If pdf-parse returns usable text → done.
+      // If not → try image OCR via OpenRouter vision models.
+      rawText = await extractTextFromBuffer(buffer);
+      logger.info(`[Eval] pdf-parse got ${rawText.length} chars.`);
 
-      if (isPDF) {
-        rawText = await extractTextFromBuffer(buffer);
-        logger.info(`[Eval] PDF text extracted: ${rawText.length} chars.`);
-      } else {
-        // Image file — no OCR in minimal mode
-        logger.warn(`[Eval] Image file detected (${contentType}). No OCR support in minimal mode.`);
-        rawText = '';
+      if (rawText.length < 30) {
+        logger.info('[Eval] pdf-parse got little text — trying image OCR via vision model…');
+        const ocrText = await extractTextWithGemini(buffer, 'image/jpeg');
+        if (ocrText && ocrText.length > rawText.length) {
+          rawText = ocrText;
+          logger.info(`[Eval] Vision OCR got ${rawText.length} chars.`);
+        }
       }
     } else {
       // Local file (dev only)
       const absolutePath = path.join(__dirname, '..', fileUrl);
-      if (absolutePath.toLowerCase().endsWith('.pdf') && fs.existsSync(absolutePath)) {
+      if (fs.existsSync(absolutePath)) {
         const buffer = fs.readFileSync(absolutePath);
         rawText = await extractTextFromBuffer(buffer);
       }

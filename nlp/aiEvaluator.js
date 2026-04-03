@@ -18,11 +18,11 @@ function normalizeQNum(val) {
  */
 function extractJson(text) {
   if (!text || typeof text !== 'string') return null;
-  try { return JSON.parse(text.trim()); } catch (_) {}
+  try { return JSON.parse(text.trim()); } catch (_) { }
   const obj = text.match(/\{[\s\S]*\}/)?.[0];
-  if (obj) { try { return JSON.parse(obj); } catch (_) {} }
+  if (obj) { try { return JSON.parse(obj); } catch (_) { } }
   const arr = text.match(/\[[\s\S]*\]/)?.[0];
-  if (arr) { try { return JSON.parse(arr); } catch (_) {} }
+  if (arr) { try { return JSON.parse(arr); } catch (_) { } }
   return null;
 }
 
