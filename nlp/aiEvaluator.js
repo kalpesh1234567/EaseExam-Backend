@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 async function callOpenRouter(model, messages, expectJson = false) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    logger.warn('No OPENROUTER_API_KEY found in environment variables.');
+    logger.error('CRITICAL: OPENROUTER_API_KEY is missing from environment variables. AI calls will fail.');
     return '';
   }
 
@@ -33,7 +33,9 @@ async function callOpenRouter(model, messages, expectJson = false) {
       }
     );
 
-    return response.data.choices[0].message.content;
+    const content = response.data.choices[0].message.content;
+    logger.info(`OpenRouter Response: ${content ? content.length : 0} characters received.`);
+    return content;
   } catch (err) {
     logger.error(`OpenRouter API failed (${model}):`, err.response?.data || err.message);
     if (err.stack) logger.error(err.stack);
@@ -87,7 +89,7 @@ async function extractTextWithGemini(buffer, mimeType = 'application/pdf') {
  */
 async function segmentAnswerSheet(rawText, questions) {
   if (!rawText || rawText.trim().length < 10) {
-    logger.warn('OCR text too short for segmentation.');
+    logger.warn(`OCR text too short for segmentation (Length: ${rawText ? rawText.length : 0}). Check OCR/Vision API status.`);
     return {};
   }
 

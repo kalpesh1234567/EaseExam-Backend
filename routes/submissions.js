@@ -285,6 +285,8 @@ router.post('/:examId', auth, (req, res, next) => {
         submission.ocrText = rawText;
         await submission.save();
 
+        logger.info(`[Eval] Final OCR OCR text length: ${rawText ? rawText.length : 0} chars.`);
+
         const maxScore = answerKey.questions.reduce((s, q) => s + q.maxMarks, 0);
 
         const evalDoc = await Evaluation.create({
