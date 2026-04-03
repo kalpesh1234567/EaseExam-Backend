@@ -243,23 +243,41 @@ router.post('/:examId', auth, (req, res, next) => {
         let rawText = '';
         const isUrl = submission.fileUrl.startsWith('http');
         
+        // Detect MIME type for OCR
+        const ext = path.extname(submission.fileUrl).toLowerCase();
+        let mimeType = 'application/pdf';
+        if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+        else if (ext === '.png') mimeType = 'image/png';
+
         if (isUrl) {
           // Download file content from Cloudinary for processing
           const response = await axios.get(submission.fileUrl, { responseType: 'arraybuffer' });
           const buffer = Buffer.from(response.data);
           
-          if (path.extname(submission.fileUrl).toLowerCase() === '.pdf') {
-            const pdfParse = require('pdf-parse');
-            const data = await pdfParse(buffer);
-            rawText = data.text || '';
+          if (ext === '.pdf') {
+            try {
+              const pdfParse = require('pdf-parse');
+              const data = await pdfParse(buffer);
+              rawText = (data.text || '').trim();
+              
+              // Fallback for scanned PDFs: if less than 50 chars, re-run with Gemini OCR
+              if (rawText.length < 50) {
+                logger.info(`[Eval] PDF text length too short (${rawText.length} chars). Falling back to Gemini OCR for PDF.`);
+                const { extractTextWithGemini } = require('../nlp/aiEvaluator');
+                rawText = await extractTextWithGemini(buffer, 'application/pdf');
+              }
+            } catch (pdfErr) {
+              logger.warn('[Eval] pdf-parse failed, trying Gemini OCR fallback:', pdfErr.message);
+              const { extractTextWithGemini } = require('../nlp/aiEvaluator');
+              rawText = await extractTextWithGemini(buffer, 'application/pdf');
+            }
           } else {
-            // It's an image, we can pass URL to tesseract if needed, 
-            // but for consistency let's stick to buffered OCR if possible 
-            // or use Gemini OCR which is more robust.
+            // It's an image
             const { extractTextWithGemini } = require('../nlp/aiEvaluator');
-            rawText = await extractTextWithGemini(buffer);
+            rawText = await extractTextWithGemini(buffer, mimeType);
           }
         } else {
+          // Local file handling (if any remain)
           const absolutePath = path.join(__dirname, '..', submission.fileUrl);
           rawText = await extractTextFromFile(absolutePath);
         }

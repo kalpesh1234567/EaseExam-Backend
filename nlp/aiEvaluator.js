@@ -15,9 +15,9 @@ function getModel() {
 }
 
 /**
- * NEW: OCR / Text extraction using Gemini 1.5 Flash (supports scanned PDFs)
+ * NEW: OCR / Text extraction using Gemini 1.5 Flash (supports scanned PDFs and images)
  */
-async function extractTextWithGemini(pdfBuffer) {
+async function extractTextWithGemini(buffer, mimeType = 'application/pdf') {
   if (!process.env.GEMINI_API_KEY) {
     logger.warn('No Gemini API key for OCR — falling back to metadata only.');
     return '';
@@ -26,23 +26,24 @@ async function extractTextWithGemini(pdfBuffer) {
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     
-    // We send the PDF as a base64 part
-    const prompt = "Please read this PDF and extract all the handwritten or typed text exactly as it appears. If there are multiple pages, extract text from all of them in order.";
+    // We send the file content as a base64 part
+    const prompt = "Please read this file and extract all the handwritten or typed text exactly as it appears. If there are multiple pages, extract text from all of them in order.";
     const result = await model.generateContent([
       prompt,
       {
         inlineData: {
-          data: pdfBuffer.toString('base64'),
-          mimeType: 'application/pdf'
+          data: buffer.toString('base64'),
+          mimeType: mimeType
         }
       }
     ]);
 
     const text = result.response.text();
-    logger.info('Extracted text using Gemini Vision/OCR.');
-    return text;
+    logger.info(`Extracted text using Gemini Vision/OCR (${mimeType}).`);
+    return text || '';
   } catch (err) {
-    logger.error('Gemini OCR failed:', err.message);
+    logger.error('Gemini OCR failed:', err.message || err);
+    if (err.stack) logger.error(err.stack);
     return '';
   }
 }
