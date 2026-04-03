@@ -37,28 +37,99 @@ async function extractTextFromFile(filePath) {
   return data.text || '';
 }
 
-// ─── Helper: derive the image MIME type from a URL/path extension ────────────
-function getMimeType(urlOrPath) {
-  const ext = path.extname(urlOrPath).toLowerCase().replace(/\?.*$/, '');
+// ─── Helper: derive MIME type from URL extension (best-effort) ──────────────
+// Returns null when extension is missing (e.g. Cloudinary /raw/upload/ URLs).
+function getMimeTypeFromUrl(urlOrPath) {
+  const clean = urlOrPath.split('?')[0];
+  const ext = path.extname(clean).toLowerCase();
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
-  if (ext === '.png') return 'image/png';
+  if (ext === '.png')  return 'image/png';
   if (ext === '.webp') return 'image/webp';
-  if (ext === '.gif') return 'image/gif';
-  if (ext === '.pdf') return 'application/pdf';
-  return null; // May be missing, will check buffer magic bytes in runBackgroundEvaluation
+  if (ext === '.gif')  return 'image/gif';
+  if (ext === '.pdf')  return 'application/pdf';
+  return null;
+}
+
+// ─── Helper: derive MIME type for LOCAL file path ────────────────────────────
+function getMimeTypeFromLocalPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.png')  return 'image/png';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif')  return 'image/gif';
+  if (ext === '.pdf')  return 'application/pdf';
+  return 'application/octet-stream';
+}
+
+// ─── Helper: parse Content-Type header to a clean MIME string ───────────────
+// "image/jpeg; charset=utf-8" becomes "image/jpeg". Unknown types return null.
+function normaliseMime(contentTypeHeader) {
+  if (!contentTypeHeader) return null;
+  const mime = contentTypeHeader.split(';')[0].trim().toLowerCase();
+  const known = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
+  return known.includes(mime) ? mime : null;
 }
 
 // ─── Helper: grade from percentage ──────────────────────────────────────────
-function calcGrade(percentage) {
-  if (percentage >= 90) return 'A+';
-  if (percentage >= 80) return 'A';
-  if (percentage >= 70) return 'B';
-  if (percentage >= 60) return 'C';
-  if (percentage >= 50) return 'D';
+function calcGrade(pct) {
+  if (pct >= 90) return 'A+';
+  if (pct >= 80) return 'A';
+  if (pct >= 70) return 'B';
+  if (pct >= 60) return 'C';
+  if (pct >= 50) return 'D';
   return 'F';
 }
 
-// ─── POST /api/submissions/submit/:testId — student submits test ─────────────
+// ─── Helper: render every page of a scanned PDF to JPEG, run vision OCR ─────
+//
+// Stack: pdfjs-dist (pure-JS PDF renderer) + @napi-rs/canvas (prebuilt .node
+// binaries for Linux/macOS/Windows — NO compilation needed, works on Render
+// free tier without any build packs).
+//
+// One-time install: npm install pdfjs-dist @napi-rs/canvas
+//
+async function renderPdfPagesToText(pdfBuffer) {
+  // Dynamic import so server still boots if the package is somehow missing
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const { createCanvas } = require('@napi-rs/canvas');
+
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(pdfBuffer),
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true,   // avoids "standardFontDataUrl" warnings
+  });
+
+  const pdfDoc = await loadingTask.promise;
+  logger.info(`[Eval] PDF has ${pdfDoc.numPages} page(s) — rendering to JPEG for OCR`);
+
+  const pageTexts = [];
+
+  for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+    const page = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 2.0 }); // ~150 dpi on A4
+
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const ctx = canvas.getContext('2d');
+
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    // encode() returns a Buffer — quality 90 keeps file size reasonable
+    const jpegBuffer = await canvas.encode('jpeg', 90);
+    logger.info(`[Eval] Page ${pageNum}/${pdfDoc.numPages}: ${jpegBuffer.length} bytes — sending to vision OCR`);
+
+    const pageText = await extractTextWithGemini(jpegBuffer, 'image/jpeg');
+    if (pageText && pageText.trim().length > 0) {
+      pageTexts.push(pageText.trim());
+    }
+
+    page.cleanup();
+  }
+
+  return pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
+}
+
+// ─── POST /api/submissions/submit/:testId ────────────────────────────────────
 router.post('/submit/:testId', auth, async (req, res) => {
   try {
     if (req.user.role !== 'student') {
@@ -77,8 +148,8 @@ router.post('/submit/:testId', auth, async (req, res) => {
     const questions = await Question.find({ test: test._id }).sort('order');
     const submission = await TestSubmission.create({ test: test._id, student: req.user.id });
     let totalMl = 0;
-
     const answers = [];
+
     for (const question of questions) {
       const studentAnswer = (req.body.answers?.[question._id.toString()] || '').trim();
       const result = evaluateAnswer(studentAnswer, question.referenceAnswer, question.maxScore);
@@ -99,7 +170,6 @@ router.post('/submit/:testId', auth, async (req, res) => {
 
     submission.mlTotal = Math.round(totalMl * 100) / 100;
     await submission.save();
-
     res.status(201).json({ message: 'Test submitted successfully', submission, answers });
   } catch (err) {
     logger.error('submit/:testId error:', err);
@@ -107,7 +177,7 @@ router.post('/submit/:testId', auth, async (req, res) => {
   }
 });
 
-// ─── GET /api/submissions/result/:testId — student gets their result ─────────
+// ─── GET /api/submissions/result/:testId ─────────────────────────────────────
 router.get('/result/:testId', auth, async (req, res) => {
   try {
     const test = await Test.findById(req.params.testId).populate('classroom', 'name');
@@ -132,7 +202,7 @@ router.get('/result/:testId', auth, async (req, res) => {
   }
 });
 
-// ─── GET /api/submissions/students-work/:testId — teacher views all submissions
+// ─── GET /api/submissions/students-work/:testId ───────────────────────────────
 router.get('/students-work/:testId', auth, async (req, res) => {
   try {
     const test = await Test.findById(req.params.testId).populate('classroom', 'owner name');
@@ -141,7 +211,8 @@ router.get('/students-work/:testId', auth, async (req, res) => {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
-    const submissions = await TestSubmission.find({ test: test._id }).populate('student', 'firstName lastName username');
+    const submissions = await TestSubmission.find({ test: test._id })
+      .populate('student', 'firstName lastName username');
     const questions = await Question.find({ test: test._id }).sort('order');
     const totalMarks = questions.reduce((s, q) => s + q.maxScore, 0);
 
@@ -159,7 +230,7 @@ router.get('/students-work/:testId', auth, async (req, res) => {
   }
 });
 
-// ─── PATCH /api/submissions/update-score/:answerId — teacher overrides score ─
+// ─── PATCH /api/submissions/update-score/:answerId ───────────────────────────
 router.patch('/update-score/:answerId', auth, async (req, res) => {
   try {
     const answer = await Answer.findById(req.params.answerId).populate({
@@ -274,10 +345,8 @@ router.post('/:examId', auth, (req, res, next) => {
     // Respond immediately — evaluation runs in the background
     res.status(201).json({ message: 'Uploaded. Evaluation in progress…', submissionId: submission._id });
 
-    // ── Background evaluation (fire-and-forget) ──────────────────────────────
     runBackgroundEvaluation(submission, answerKey).catch(bgErr => {
-      // This catch is a safety net; runBackgroundEvaluation handles its own errors internally
-      logger.error('Unexpected top-level background eval error:', bgErr);
+      logger.error('Top-level background eval error:', bgErr);
     });
 
   } catch (err) {
@@ -286,122 +355,81 @@ router.post('/:examId', auth, (req, res, next) => {
   }
 });
 
-// ─── Background evaluation (extracted for clarity) ───────────────────────────
+// ─── Background evaluation ───────────────────────────────────────────────────
 async function runBackgroundEvaluation(submission, answerKey) {
   try {
     // ── Step 1: OCR / text extraction ────────────────────────────────────────
     let rawText = '';
     const fileUrl = submission.fileUrl;
     const isRemoteUrl = fileUrl.startsWith('http');
-    
-    let mimeType = getMimeType(fileUrl);
-    let buffer = null;
 
     if (isRemoteUrl) {
-      logger.info(`[Eval] Downloading file from Cloudinary: ${fileUrl}`);
-      const response = await axios.get(fileUrl, {
-        responseType: 'arraybuffer',
-        timeout: 30_000,
-      });
-      buffer = Buffer.from(response.data);
+      logger.info(`[Eval] Downloading file: ${fileUrl}`);
+      const response = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30_000 });
+      const buffer = Buffer.from(response.data);
 
-      // Robust Type Detection: Check magic bytes if extension was missing
-      if (!mimeType && buffer.length > 4) {
-        // %PDF-
-        if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
-          mimeType = 'application/pdf';
-        } 
-        // JPEG: FF D8 FF
-        else if (buffer[0] === 0xff && buffer[1] === 0xd8) {
-          mimeType = 'image/jpeg';
-        }
-        // PNG: 89 50 4E 47
-        else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
-          mimeType = 'image/png';
-        }
-        
-        if (mimeType) {
-          logger.info(`[Eval] Detected MIME type from buffer: ${mimeType}`);
-        }
-      }
+      // Determine MIME type in priority order:
+      //   1. HTTP Content-Type header — most reliable; works for Cloudinary
+      //      /raw/upload/ URLs that have NO file extension.
+      //   2. URL file extension — fallback for normal servers.
+      //   3. Default image/jpeg — last resort; let vision model attempt it.
+      const headerMime = normaliseMime(response.headers['content-type']);
+      const urlMime    = getMimeTypeFromUrl(fileUrl);
+      const mimeType   = headerMime || urlMime || 'image/jpeg';
 
-      if (!mimeType) {
-        // Final fallback — if it's from Cloudinary 'raw' folder, it's almost always a PDF
-        if (fileUrl.includes('/raw/upload/')) {
-          mimeType = 'application/pdf';
-          logger.info('[Eval] No extension found, but URL is in raw folder — assuming application/pdf');
-        } else {
-          throw new Error(`Could not determine file type for URL: ${fileUrl}`);
-        }
-      }
+      logger.info(`[Eval] Detected MIME — header: ${headerMime ?? 'none'}, url: ${urlMime ?? 'none'}, using: ${mimeType}`);
 
       if (mimeType === 'application/pdf') {
-        // Step 1a: try fast text-layer extraction via pdf-parse
+        // ── 1a: text-layer extraction (fast, works for digital PDFs) ─────────
         try {
           const pdfParse = require('pdf-parse');
-          const data = await pdfParse(buffer);
-          rawText = (data.text || '').trim();
+          const pdfData = await pdfParse(buffer);
+          rawText = (pdfData.text || '').trim();
           logger.info(`[Eval] pdf-parse extracted ${rawText.length} chars.`);
         } catch (pdfErr) {
           logger.warn('[Eval] pdf-parse failed:', pdfErr.message);
           rawText = '';
         }
 
-        // Step 1b: if text layer is empty/too short, it's a scanned PDF.
-        // We cannot send a raw PDF to a vision model — vision APIs only accept images.
-        // Attempt to render each page as a JPEG using pdf-img-convert (reliable cloud-ready library).
+        // ── 1b: scanned PDF — render pages to JPEG, run vision OCR ───────────
+        //
+        // pdfjs-dist  = pure-JS renderer (zero native deps)
+        // @napi-rs/canvas = prebuilt binaries for Linux/macOS/Windows
+        //                   (no compilation — works on Render free tier)
+        //
+        // npm install pdfjs-dist @napi-rs/canvas
+        //
         if (rawText.length < 50) {
-          logger.info('[Eval] Short PDF text — attempting page-image render for vision OCR…');
+          logger.info('[Eval] Scanned PDF — rendering pages to JPEG for vision OCR…');
           try {
-            // pdf-img-convert returns an array of UInt8Arrays (the images)
-            const convert = require('pdf-img-convert');
-            const pageImages = await convert.convert(buffer, {
-              width: 1200, // Higher res for better OCR
-              format: 'jpeg'
-            });
-
-            if (pageImages && pageImages.length > 0) {
-              // Run OCR on each page buffer and concatenate
-              logger.info(`[Eval] Rendering ${pageImages.length} page(s) as images for OCR.`);
-              const pageTexts = await Promise.all(
-                pageImages.map((pageBuf, index) => {
-                  logger.info(`[Eval] Starting Vision OCR for page ${index + 1}...`);
-                  const nodeBuffer = Buffer.from(pageBuf);
-                  return extractTextWithGemini(nodeBuffer, 'image/jpeg');
-                })
-              );
-              rawText = pageTexts.filter(Boolean).join('\n\n');
-              logger.info(`[Eval] Vision OCR across ${pageImages.length} page(s): ${rawText.length} chars.`);
-            } else {
-              logger.warn('[Eval] pdf-img-convert returned 0 pages.');
-            }
+            rawText = await renderPdfPagesToText(buffer);
+            logger.info(`[Eval] Vision OCR from PDF pages: ${rawText.length} chars.`);
           } catch (renderErr) {
-            logger.error('[Eval] PDF-to-Image conversion CRITICAL FAILURE:', renderErr.message);
-            logger.error(renderErr.stack);
-            // rawText stays empty — evaluation will still run, scoring 0 with
-            // a clear "no answer found" feedback for each question.
+            logger.warn('[Eval] PDF page render failed:', renderErr.message);
+            // rawText stays '' — questions score 0 with "no answer" feedback.
           }
         }
+
       } else {
-        // It's an image — pass directly to vision OCR
+        // ── Image file — send directly to vision OCR ─────────────────────────
         rawText = await extractTextWithGemini(buffer, mimeType);
         logger.info(`[Eval] Vision OCR (image): ${rawText.length} chars.`);
       }
+
     } else {
-      // Local file (fallback path)
+      // ── Local file (dev only) ─────────────────────────────────────────────
       const absolutePath = path.join(__dirname, '..', fileUrl);
+      logger.info(`[Eval] Local file OCR: ${absolutePath}`);
       rawText = await extractTextFromFile(absolutePath);
       logger.info(`[Eval] Local file OCR: ${rawText.length} chars.`);
     }
 
     submission.ocrText = rawText;
     await submission.save();
-
-    logger.info(`[Eval] OCR complete. Total chars: ${rawText.length}`);
+    logger.info(`[Eval] OCR complete — ${rawText.length} chars.`);
 
     // ── Step 2: Create evaluation document ───────────────────────────────────
     const maxScore = answerKey.questions.reduce((s, q) => s + q.maxMarks, 0);
-
     const evalDoc = await Evaluation.create({
       submission: submission._id,
       totalScore: 0,
@@ -411,7 +439,7 @@ async function runBackgroundEvaluation(submission, answerKey) {
       feedbackJson: '',
     });
 
-    // ── Step 3: Segment the OCR text into per-question answer chunks ─────────
+    // ── Step 3: Segment OCR text into per-question answer chunks ─────────────
     logger.info(`[Eval] Starting segmentation for submission ${submission._id}`);
     const segments = await segmentAnswerSheet(rawText, answerKey.questions);
     const segmentCount = Object.values(segments).filter(v => v && v.trim().length > 3).length;
@@ -421,18 +449,17 @@ async function runBackgroundEvaluation(submission, answerKey) {
     let totalScore = 0;
 
     for (const q of answerKey.questions) {
-      // normalizeQNum ensures "Q1" / "01" / "1" all resolve to "1"
       const qKey = String(q.questionNo).replace(/^0+/, '') || String(q.questionNo);
       const segment = segments[qKey];
-      const usedFallback = !segment || segment.trim().length <= 3;
+      const hasSegment = segment && segment.trim().length > 3;
 
-      if (usedFallback) {
-        logger.warn(`[Eval] Q${q.questionNo}: no segment found — will score 0 with 'no answer' feedback.`);
+      if (!hasSegment) {
+        logger.warn(`[Eval] Q${q.questionNo}: no segment — scoring 0.`);
       }
 
-      // Do NOT fall back to full rawText — that would evaluate the entire sheet
-      // as if it were one question's answer, leading to inflated or nonsense scores.
-      const studentSegment = usedFallback ? '' : segment;
+      // NEVER fall back to full rawText — that inflates scores by evaluating the
+      // entire answer sheet as if it were one question's answer.
+      const studentSegment = hasSegment ? segment : '';
 
       const result = await evaluateSingleAnswer(
         studentSegment,
@@ -444,27 +471,27 @@ async function runBackgroundEvaluation(submission, answerKey) {
       totalScore += result.marksObtained;
 
       await QuestionScore.create({
-        evaluation: evalDoc._id,
-        questionNo: q.questionNo,
+        evaluation:    evalDoc._id,
+        questionNo:    q.questionNo,
         marksObtained: result.marksObtained,
-        maxMarks: q.maxMarks,
+        maxMarks:      q.maxMarks,
         studentAnswer: studentSegment,
-        feedback: result.feedback,
-        suggestion: result.suggestion,
+        feedback:      result.feedback,
+        suggestion:    result.suggestion,
       });
 
       logger.info(`[Eval] Q${q.questionNo}: ${result.marksObtained}/${q.maxMarks}`);
     }
 
-    // ── Step 5: Finalise evaluation ──────────────────────────────────────────
+    // ── Step 5: Finalise ─────────────────────────────────────────────────────
     const percentage = maxScore > 0 ? Math.round((totalScore / maxScore) * 100) : 0;
     const grade = calcGrade(percentage);
 
-    evalDoc.totalScore = totalScore;
-    evalDoc.percentage = percentage;
-    evalDoc.grade = grade;
+    evalDoc.totalScore   = totalScore;
+    evalDoc.percentage   = percentage;
+    evalDoc.grade        = grade;
     evalDoc.feedbackJson = JSON.stringify({
-      summary: `Scored ${totalScore}/${maxScore}`,
+      summary:       `Scored ${totalScore}/${maxScore}`,
       segmentsFound: segmentCount,
     });
     await evalDoc.save();
@@ -477,11 +504,11 @@ async function runBackgroundEvaluation(submission, answerKey) {
   } catch (bgErr) {
     logger.error('[Eval] Background evaluation error:', bgErr);
     try {
-      submission.status = 'failed';
+      submission.status   = 'failed';
       submission.errorMsg = bgErr.message;
       await submission.save();
     } catch (saveErr) {
-      logger.error('[Eval] Could not update submission status to failed:', saveErr.message);
+      logger.error('[Eval] Could not save failed status:', saveErr.message);
     }
   }
 }
