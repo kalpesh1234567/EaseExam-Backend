@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { PDFParse: pdfParse } = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 const logger = require('../utils/logger');
 
@@ -13,15 +13,14 @@ async function extractText(filePath, mimetype) {
     // 1. Handle PDF
     if (mimetype === 'application/pdf') {
       const dataBuffer = fs.readFileSync(filePath);
-      const data = await pdfParse(dataBuffer);
-      if (data.text && data.text.trim().length > 10) {
-        return data.text.trim();
+      const pdf = new PDFParse({ verbosity: 0 });
+      await pdf.load(dataBuffer);
+      const text = await pdf.getText();
+      if (text && text.trim().length > 10) {
+        return text.trim();
       }
-      // If PDF has no text layer (it's scanned), we would need ghostscript/imagemagick
-      // to convert PDF pages to images then run Tesseract. For this MVP, we assume
-      // text-based PDFs or direct Image uploads.
       logger.warn(`PDF has no extractable text layer or is scanned: ${filePath}`);
-      return data.text || '';
+      return text || '';
     }
 
     // 2. Handle Images (OCR via Tesseract.js)
