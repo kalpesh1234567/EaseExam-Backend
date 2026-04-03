@@ -112,7 +112,7 @@ router.post('/:id/question-paper', auth, upload.single('questionPaper'), async (
     const exam = await Exam.findOne({ _id: req.params.id, teacher: req.user.id });
     if (!exam) return res.status(404).json({ message: 'Exam not found or forbidden' });
 
-    exam.questionPaperUrl = `/uploads/papers/${req.file.filename}`;
+    exam.questionPaperUrl = req.file.path; // Cloudinary returns the full URL in path
     await exam.save();
 
     res.json({ message: 'Question paper uploaded successfully', questionPaperUrl: exam.questionPaperUrl });

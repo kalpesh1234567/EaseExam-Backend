@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
 const auth = require('../middleware/auth');
 const upload = require('../utils/fileUpload');
 const logger = require('../utils/logger');
@@ -209,7 +210,7 @@ router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
       return res.status(400).json({ message: 'Already submitted.' });
     }
 
-    const fileUrl = `/uploads/sheets/${req.file.filename}`;
+    const fileUrl = req.file.path; // Cloudinary full URL
     const submission = await StudentSubmission.create({
       exam: exam._id,
       student: req.user.id,
@@ -222,8 +223,29 @@ router.post('/:examId', auth, upload.single('sheetUrl'), async (req, res) => {
     // ── Background Evaluation (Two-Phase) ────────────────────────────────────
     (async () => {
       try {
-        const absolutePath = path.join(__dirname, '..', req.file.path);
-        const rawText = await extractTextFromFile(absolutePath);
+        let rawText = '';
+        const isUrl = submission.fileUrl.startsWith('http');
+        
+        if (isUrl) {
+          // Download file content from Cloudinary for processing
+          const response = await axios.get(submission.fileUrl, { responseType: 'arraybuffer' });
+          const buffer = Buffer.from(response.data);
+          
+          if (path.extname(submission.fileUrl).toLowerCase() === '.pdf') {
+            const pdfParse = require('pdf-parse');
+            const data = await pdfParse(buffer);
+            rawText = data.text || '';
+          } else {
+            // It's an image, we can pass URL to tesseract if needed, 
+            // but for consistency let's stick to buffered OCR if possible 
+            // or use Gemini OCR which is more robust.
+            const { extractTextWithGemini } = require('../nlp/aiEvaluator');
+            rawText = await extractTextWithGemini(buffer);
+          }
+        } else {
+          const absolutePath = path.join(__dirname, '..', submission.fileUrl);
+          rawText = await extractTextFromFile(absolutePath);
+        }
 
         submission.ocrText = rawText;
         await submission.save();

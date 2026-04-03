@@ -55,7 +55,7 @@ router.post('/:examId', auth, upload.single('answerKey'), async (req, res) => {
       }
     }
 
-    const fileUrl = req.file ? `/uploads/keys/${req.file.filename}` : '';
+    const fileUrl = req.file ? req.file.path : '';
 
     const existingKey = await AnswerKey.findOne({ exam: exam._id });
     if (existingKey) {
