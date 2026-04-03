@@ -4,6 +4,11 @@ const User = require('../models/User');
 const router = express.Router();
 
 function generateToken(user) {
+  if (!process.env.JWT_SECRET) {
+    const logger = require('../utils/logger');
+    logger.error('CRITICAL: JWT_SECRET is missing from environment variables');
+    throw new Error('Server configuration error: JWT_SECRET is missing');
+  }
   return jwt.sign(
     { id: user._id, role: user.role, firstName: user.firstName, lastName: user.lastName },
     process.env.JWT_SECRET,

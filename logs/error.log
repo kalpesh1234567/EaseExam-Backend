@@ -1,0 +1,8 @@
+2026-04-03 17:31:31 [ERROR] Failed to start server: morgan is not defined
+ReferenceError: morgan is not defined
+    at startServer (C:\Users\Dell\.gemini\antigravity\scratch\asae_project\server\index.js:18:9)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+2026-04-03 17:31:37 [ERROR] Failed to start server: morgan is not defined
+ReferenceError: morgan is not defined
+    at startServer (C:\Users\Dell\.gemini\antigravity\scratch\asae_project\server\index.js:18:9)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
