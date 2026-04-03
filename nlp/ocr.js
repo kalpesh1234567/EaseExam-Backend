@@ -1,5 +1,5 @@
 const fs = require('fs');
-const pdfParse = require('pdf-parse');
+const { PDFParse: pdfParse } = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 const logger = require('../utils/logger');
 

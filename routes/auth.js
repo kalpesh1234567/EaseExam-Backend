@@ -122,3 +122,4 @@ router.put('/resetpassword/:resettoken', async (req, res) => {
 });
 
 module.exports = router;
+

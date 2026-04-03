@@ -1,4 +1,4 @@
-const pdfParse = require('pdf-parse');
+const { PDFParse: pdfParse } = require('pdf-parse');
 const fs = require('fs');
 const { extractTextWithGemini } = require('../nlp/aiEvaluator');
 const logger = require('../utils/logger');

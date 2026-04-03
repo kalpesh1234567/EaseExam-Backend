@@ -70,6 +70,39 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
+// GET /api/exams/:id/submissions-status — Get all enrolled students and their submission status (teacher only)
+router.get('/:id/submissions-status', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+
+    const exam = await Exam.findById(req.params.id);
+    if (!exam) return res.status(404).json({ message: 'Exam not found' });
+
+    // 1. Get all enrolled students for this classroom
+    const enrollments = await Enrollment.find({ classroom: exam.classroom }).populate('student', 'firstName lastName username email');
+    
+    // 2. Get all submissions for this exam
+    const submissions = await StudentSubmission.find({ exam: exam._id });
+
+    // 3. Map enrollments to status
+    const statusList = enrollments.map(en => {
+      const sub = submissions.find(s => s.student.toString() === en.student._id.toString());
+      return {
+        student: en.student,
+        hasSubmitted: !!sub,
+        status: sub ? sub.status : 'not_submitted',
+        submissionId: sub ? sub._id : null,
+        fileUrl: sub ? sub.fileUrl : null,
+        updatedAt: sub ? sub.updatedAt : null
+      };
+    });
+
+    res.json({ exam, students: statusList });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // POST /api/exams/:id/question-paper — Upload question paper PDF (teacher only)
 router.post('/:id/question-paper', auth, upload.single('questionPaper'), async (req, res) => {
   try {
