@@ -1,4 +1,4 @@
-const { PDFParse } = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 const fs = require('fs');
 const { extractTextWithGemini } = require('../nlp/aiEvaluator');
 const logger = require('../utils/logger');
@@ -10,9 +10,8 @@ const logger = require('../utils/logger');
  */
 const extractTextFromPDF = async (dataBuffer) => {
     try {
-        const pdf = new PDFParse({ verbosity: 0 });
-        await pdf.load(dataBuffer);
-        let text = await pdf.getText() || '';
+        const data = await pdfParse(dataBuffer);
+        let text = data.text || '';
         
         // If text is very short/empty, it might be a scanned PDF (images only)
         if (text.trim().length < 10) {

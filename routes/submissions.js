@@ -26,11 +26,10 @@ const { segmentAnswerSheet, evaluateSingleAnswer } = require('../nlp/aiEvaluator
 async function extractTextFromFile(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.pdf') {
-    const { PDFParse } = require('pdf-parse');
+    const pdfParse = require('pdf-parse');
     const buffer = fs.readFileSync(filePath);
-    const pdf = new PDFParse({ verbosity: 0 });
-    await pdf.load(buffer);
-    return (await pdf.getText()) || '';
+    const data = await pdfParse(buffer);
+    return data.text || '';
   } else {
     const Tesseract = require('tesseract.js');
     const { data } = await Tesseract.recognize(filePath, 'eng');

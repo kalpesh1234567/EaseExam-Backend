@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { PDFParse } = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 const logger = require('../utils/logger');
 
@@ -13,14 +13,12 @@ async function extractText(filePath, mimetype) {
     // 1. Handle PDF
     if (mimetype === 'application/pdf') {
       const dataBuffer = fs.readFileSync(filePath);
-      const pdf = new PDFParse({ verbosity: 0 });
-      await pdf.load(dataBuffer);
-      const text = await pdf.getText();
-      if (text && text.trim().length > 10) {
-        return text.trim();
+      const data = await pdfParse(dataBuffer);
+      if (data.text && data.text.trim().length > 10) {
+        return data.text.trim();
       }
       logger.warn(`PDF has no extractable text layer or is scanned: ${filePath}`);
-      return text || '';
+      return data.text || '';
     }
 
     // 2. Handle Images (OCR via Tesseract.js)
