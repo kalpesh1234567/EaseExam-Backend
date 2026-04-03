@@ -1,56 +1,114 @@
 const axios = require('axios');
 const logger = require('../utils/logger');
 
-// Centralize the Axios call for OpenRouter to handle errors and headers uniformly
-async function callOpenRouter(model, messages, expectJson = false) {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    logger.error('CRITICAL: OPENROUTER_API_KEY is missing from environment variables. AI calls will fail.');
-    return '';
-  }
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-  const payload = {
-    model: model,
-    messages: messages,
-    temperature: 0.1,
-  };
-
-  if (expectJson) {
-      payload.response_format = { type: "json_object" };
-  }
-
-  try {
-    const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
-      payload,
-      {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://github.com/kalpesh1234567/EaseExam', // Best practice for OpenRouter
-          'X-Title': 'EaseExam ASAE'
-        },
-      }
-    );
-
-    const content = response.data.choices[0].message.content;
-    logger.info(`OpenRouter Response: ${content ? content.length : 0} characters received.`);
-    return content;
-  } catch (err) {
-    logger.error(`OpenRouter API failed (${model}):`, err.response?.data || err.message);
-    if (err.stack) logger.error(err.stack);
-    return '';
-  }
+/**
+ * Normalize a raw question-number value from the model into a plain integer
+ * string so that "Q1", "q 1", " 01" all become "1".
+ */
+function normalizeQNum(val) {
+  if (val === undefined || val === null) return '';
+  return String(val).replace(/[^0-9]/g, '').replace(/^0+/, '') || '';
 }
 
 /**
- * OCR / Text extraction using OpenRouter Vision Model
- * Uses Qwen-2-VL-72B-Instruct (free tier) to extract text from images and documents
+ * Safe JSON extractor: tries the full text first, then falls back to the
+ * first {...} or [...] substring. Returns null on complete failure.
  */
-async function extractTextWithGemini(buffer, mimeType = 'application/pdf') {
-  logger.info(`Starting OpenRouter OCR (${mimeType}).`);
-  
-  // Convert buffer to base64 data URI format expected by most vision endpoints
+function extractJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  // Try full text first (model returned pure JSON)
+  try { return JSON.parse(text.trim()); } catch (_) {}
+  // Try first object
+  const obj = text.match(/\{[\s\S]*\}/)?.[0];
+  if (obj) { try { return JSON.parse(obj); } catch (_) {} }
+  // Try first array
+  const arr = text.match(/\[[\s\S]*\]/)?.[0];
+  if (arr) { try { return JSON.parse(arr); } catch (_) {} }
+  return null;
+}
+
+// ─── Core API call ───────────────────────────────────────────────────────────
+
+/**
+ * Centralized OpenRouter call.
+ * Returns { content: string } on success, throws on unrecoverable error.
+ * Retries up to `maxRetries` times with exponential back-off.
+ */
+async function callOpenRouter(model, messages, expectJson = false, maxRetries = 2) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENROUTER_API_KEY is missing from environment variables.');
+  }
+
+  const payload = {
+    model,
+    messages,
+    temperature: 0.1,
+    ...(expectJson ? { response_format: { type: 'json_object' } } : {}),
+  };
+
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await axios.post(
+        'https://openrouter.ai/api/v1/chat/completions',
+        payload,
+        {
+          timeout: 60_000, // 60-second hard timeout — prevents indefinite hangs
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com/kalpesh1234567/EaseExam',
+            'X-Title': 'EaseExam ASAE',
+          },
+        }
+      );
+
+      const content = response.data?.choices?.[0]?.message?.content ?? null;
+      if (content === null) {
+        throw new Error('Model returned no content in choices[0].message.content');
+      }
+      logger.info(`OpenRouter (${model}): ${content.length} chars received.`);
+      return content;
+    } catch (err) {
+      lastErr = err;
+      const status = err.response?.status;
+      // Don't retry on auth errors or bad requests
+      if (status === 401 || status === 400) break;
+      if (attempt < maxRetries) {
+        const delay = (attempt + 1) * 1500;
+        logger.warn(`OpenRouter attempt ${attempt + 1} failed (${status ?? err.message}). Retrying in ${delay}ms…`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+
+  logger.error(`OpenRouter API failed after ${maxRetries + 1} attempts (${model}):`, lastErr?.response?.data || lastErr?.message);
+  throw lastErr; // Callers decide how to handle — they no longer silently get ''
+}
+
+// ─── Phase 0: OCR ────────────────────────────────────────────────────────────
+
+/**
+ * Extract text from an image buffer using OpenRouter vision model.
+ *
+ * IMPORTANT: This only works for IMAGE files (jpeg, png, webp, gif).
+ * PDFs must be parsed with pdf-parse first (see submission.js).
+ * Supported mimeTypes: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'
+ */
+async function extractTextFromImage(buffer, mimeType = 'image/jpeg') {
+  const supportedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+  if (!supportedImageTypes.includes(mimeType)) {
+    throw new Error(
+      `extractTextFromImage only supports image files. Received: "${mimeType}". ` +
+      'For PDFs, use pdf-parse in the calling code before invoking this function.'
+    );
+  }
+
+  logger.info(`Starting OpenRouter vision OCR for ${mimeType}.`);
+
   const base64Data = buffer.toString('base64');
   const dataUrl = `data:${mimeType};base64,${base64Data}`;
 
@@ -60,104 +118,111 @@ async function extractTextWithGemini(buffer, mimeType = 'application/pdf') {
       content: [
         {
           type: 'text',
-          text: 'Please read this document carefully and extract all the handwritten or typed text exactly as it appears. If there are multiple pages, extract text from all of them in order.'
+          text:
+            'Please read this image carefully and extract ALL handwritten or typed text exactly as it appears. ' +
+            'Preserve paragraph structure. Do not add any commentary — output only the extracted text.',
         },
         {
-          type: 'image_url', // Most vision APIs accept image_url for base64
-          image_url: {
-            url: dataUrl
-          }
-        }
-      ]
-    }
+          type: 'image_url',
+          image_url: { url: dataUrl },
+        },
+      ],
+    },
   ];
 
-  // We use Qwen VL which is good at OCR and operates well on OpenRouter
-  // meta-llama/llama-3.2-11b-vision-instruct:free is also an option
-  const text = await callOpenRouter('qwen/qwen-2-vl-72b-instruct:free', messages);
-  
-  if (text) {
-      logger.info('Extracted text using OpenRouter Vision successfully.');
+  try {
+    const text = await callOpenRouter('qwen/qwen-2-vl-72b-instruct:free', messages);
+    logger.info('Vision OCR completed successfully.');
+    return text.trim();
+  } catch (err) {
+    logger.error('Vision OCR failed:', err.message);
+    return ''; // OCR failure is non-fatal — submission.js falls back gracefully
   }
-
-  return text || '';
 }
 
+// Keep the old export name so submission.js import doesn't break
+const extractTextWithGemini = extractTextFromImage;
+
+// ─── Phase 1: Segmentation ───────────────────────────────────────────────────
+
 /**
- * PHASE 1 — Segment a student's answer sheet into per-question answers.
- * Uses Llama-3-8B-Instruct via OpenRouter
+ * Segment a student's OCR text into per-question answer chunks.
+ * Returns a map: { "1": "answer text", "2": "...", ... }
+ * Never throws — returns {} on total failure.
  */
 async function segmentAnswerSheet(rawText, questions) {
   if (!rawText || rawText.trim().length < 10) {
-    logger.warn(`OCR text too short for segmentation (Length: ${rawText ? rawText.length : 0}). Check OCR/Vision API status.`);
+    logger.warn(`OCR text too short for segmentation (${rawText?.length ?? 0} chars). Returning empty map.`);
     return {};
+  }
+
+  // Truncate very long OCR text to avoid blowing the context window.
+  // ~12 000 chars ≈ 3 000 tokens — safe for an 8B model.
+  const MAX_OCR_CHARS = 12_000;
+  const truncatedText =
+    rawText.length > MAX_OCR_CHARS
+      ? rawText.slice(0, MAX_OCR_CHARS) + '\n[...truncated for length...]'
+      : rawText;
+
+  if (rawText.length > MAX_OCR_CHARS) {
+    logger.warn(`OCR text truncated from ${rawText.length} to ${MAX_OCR_CHARS} chars for segmentation.`);
   }
 
   const questionList = questions
     .map(q => `Q${q.questionNo}${q.text ? `: ${q.text}` : ''}`)
     .join('\n');
 
-  const prompt = `
-You are an expert at analyzing handwritten or typed student answer sheets.
+  const prompt = `You are an expert at analysing handwritten or typed student answer sheets.
 
-Your task is to READ the full OCR text below and IDENTIFY which portion of the text is the student's answer to each question number.
-
-The student's sheet may have answers labelled as "Q1", "1.", "Question 1", "Ans 1", "Answer 1", etc.
+READ the OCR text below and IDENTIFY the student's answer for each question number listed.
+Labels used by students may include "Q1", "1.", "Question 1", "Ans 1", "Answer 1", etc.
 
 Questions to locate:
 ${questionList}
 
-Full OCR text of student's answer sheet:
+Full OCR text:
 """
-${rawText}
+${truncatedText}
 """
 
-Return a JSON object where keys are the question numbers (as strings) and values are the student's extracted answer text for that question.
-If no answer is found for a question, use an empty string "".
-
-IMPORTANT:
-- Only return the JSON object, nothing else.
-- Do NOT include your own commentary.
-- Example format:
-{
-  "1": "The TCP/IP model has four layers: Application, Transport, Internet, Network Access...",
-  "2": "Newton's second law states F = ma...",
-  "3": ""
-}
-`;
-
-  const text = await callOpenRouter(
-      'meta-llama/llama-3-8b-instruct:free', 
-      [{ role: 'user', content: prompt }],
-      true // Expect JSON
-  );
-
-  if (!text) {
-      logger.error('Segmentation failed, returning empty fallback map.');
-      return {};
-  }
+Return ONLY a valid JSON object where keys are question numbers (as plain digit strings, e.g. "1", "2") and values are the student's answer text for that question. Use "" for unanswered questions.
+Example: { "1": "The TCP/IP model has four layers...", "2": "Newton's second law states F=ma...", "3": "" }`;
 
   try {
-    // OpenRouter / Llama 3 often wraps JSON in backticks
-    const jsonStr = text.match(/\{[\s\S]*\}/)?.[0] || text;
-    const parsed = JSON.parse(jsonStr);
+    const text = await callOpenRouter(
+      'meta-llama/llama-3-8b-instruct:free',
+      [{ role: 'user', content: prompt }],
+      true
+    );
+
+    const parsed = extractJson(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      logger.error('Segmentation: model returned invalid JSON structure.', text?.slice(0, 200));
+      return {};
+    }
 
     const segments = {};
     for (const [k, v] of Object.entries(parsed)) {
-      segments[String(k)] = typeof v === 'string' ? v.trim() : String(v).trim();
+      const normKey = normalizeQNum(k);
+      if (normKey) {
+        segments[normKey] = typeof v === 'string' ? v.trim() : String(v ?? '').trim();
+      }
     }
 
-    logger.info(`Segmented sheet into ${Object.keys(segments).length} question answers using Llama 3.`);
+    logger.info(`Segmented ${Object.keys(segments).length}/${questions.length} questions.`);
     return segments;
   } catch (err) {
-    logger.error('Failed to parse OpenRouter segmentation JSON:', err.message);
+    logger.error('Segmentation failed:', err.message);
     return {};
   }
 }
 
+// ─── Phase 2: Evaluation ─────────────────────────────────────────────────────
+
 /**
- * PHASE 2 — Evaluate one question's extracted student answer against the model answer.
- * Uses Llama-3-8B-Instruct via OpenRouter
+ * Evaluate one question's extracted student answer against the model answer.
+ * Returns { marksObtained: number, feedback: string, suggestion: string }
+ * Never throws.
  */
 async function evaluateSingleAnswer(studentAnswerSegment, modelAnswer, maxMarks, questionText = '') {
   const hasAnswer = studentAnswerSegment && studentAnswerSegment.trim().length > 3;
@@ -170,16 +235,20 @@ async function evaluateSingleAnswer(studentAnswerSegment, modelAnswer, maxMarks,
     };
   }
 
-  const prompt = `
-You are an expert academic evaluator assigning marks to a student's answer.
+  // Truncate individual fields to keep total prompt under ~3 000 tokens
+  const MAX_FIELD = 2_000;
+  const safeModel = (modelAnswer || '').slice(0, MAX_FIELD);
+  const safeAnswer = studentAnswerSegment.slice(0, MAX_FIELD);
+
+  const prompt = `You are an expert academic evaluator.
 
 ${questionText ? `Question: "${questionText}"` : ''}
 Maximum marks: ${maxMarks}
-Model (Reference) Answer: "${modelAnswer}"
+Model (Reference) Answer: "${safeModel}"
 
 Student's Answer:
 """
-${studentAnswerSegment}
+${safeAnswer}
 """
 
 Instructions:
@@ -188,113 +257,140 @@ Instructions:
 3. Be strict about factual errors.
 4. Keep feedback concise and constructive.
 
-Return ONLY a valid JSON object with the following exact format:
+Return ONLY a valid JSON object with EXACTLY this format (no extra keys):
 {
-  "marksObtained": <number between 0 and ${maxMarks}>,
-  "feedback": "<brief feedback on what was correct or missing>",
-  "suggestion": "<one actionable improvement tip for the student>"
-}
-`;
-
-  const text = await callOpenRouter(
-      'meta-llama/llama-3-8b-instruct:free', 
-      [{ role: 'user', content: prompt }],
-      true // Expect JSON
-  );
+  "marksObtained": <number between 0 and ${maxMarks}, integers or .5 steps only>,
+  "feedback": "<brief feedback, max 2 sentences>",
+  "suggestion": "<one actionable improvement tip>"
+}`;
 
   const defaultFail = {
     marksObtained: 0,
-    feedback: 'Failed to evaluate via AI due to an internal error or missing API key.',
+    feedback: 'Failed to evaluate due to an AI service error.',
     suggestion: 'Please contact your instructor for a manual review.',
   };
 
-  if (!text) return defaultFail;
-
   try {
-    const jsonStr = text.match(/\{[\s\S]*\}/)?.[0] || text;
-    const parsed = JSON.parse(jsonStr);
+    const text = await callOpenRouter(
+      'meta-llama/llama-3-8b-instruct:free',
+      [{ role: 'user', content: prompt }],
+      true
+    );
+
+    const parsed = extractJson(text);
+    if (!parsed || typeof parsed !== 'object') {
+      logger.error('Evaluation: model returned invalid JSON.', text?.slice(0, 200));
+      return defaultFail;
+    }
+
+    // Robust marks parsing — handles "4", 4, 4.5, "four" → NaN → 0
+    const rawMarks = parsed.marksObtained;
+    const parsedMarks = parseFloat(rawMarks);
+
+    if (isNaN(parsedMarks)) {
+      logger.warn(`Evaluation: marksObtained "${rawMarks}" is not a number. Defaulting to 0.`);
+    }
+
+    const marksObtained = isNaN(parsedMarks)
+      ? 0
+      : Math.min(Math.max(0, parsedMarks), maxMarks);
 
     return {
-      marksObtained: Math.min(Math.max(0, Number(parsed.marksObtained) || 0), maxMarks),
-      feedback: parsed.feedback || 'Evaluated successfully.',
-      suggestion: parsed.suggestion || 'Review the topic concepts.',
+      marksObtained,
+      feedback: typeof parsed.feedback === 'string' ? parsed.feedback : 'Evaluated successfully.',
+      suggestion: typeof parsed.suggestion === 'string' ? parsed.suggestion : 'Review the topic concepts.',
     };
   } catch (err) {
-    logger.error('Failed to parse OpenRouter evaluation JSON:', err.message);
+    logger.error('Evaluation API call failed:', err.message);
     return defaultFail;
   }
 }
 
-// Keeping the function name 'extractTextWithGemini' so we do not have to rewrite submission.js 
-// We will just rename it underneath, but export it as is.
+// ─── Answer Key Extraction ───────────────────────────────────────────────────
+
 /**
- * NEW: Auto-Extract structured model answers from a teacher's Answer Key OCR text.
- * Maps the unstructured OCR text to the predefined question numbers.
+ * Auto-extract structured model answers from a teacher's answer key OCR text.
+ * Returns the original questions array with modelAnswer fields filled in where
+ * the teacher hadn't entered them manually.
+ * Never throws.
  */
 async function autoExtractAnswerKey(ocrText, questions) {
   if (!ocrText || ocrText.trim().length < 20) {
-    logger.warn('OCR text too short for answer key extraction.');
+    logger.warn('OCR text too short for answer key extraction. Returning original questions.');
     return questions;
   }
+
+  const MAX_OCR_CHARS = 12_000;
+  const truncatedText =
+    ocrText.length > MAX_OCR_CHARS ? ocrText.slice(0, MAX_OCR_CHARS) + '\n[...truncated...]' : ocrText;
 
   const questionList = questions
     .map(q => `Q${q.questionNo}${q.text ? `: ${q.text}` : ''}`)
     .join('\n');
 
-  const prompt = `
-You are an expert at extracting structured information from academic answer keys.
+  const prompt = `You are an expert at extracting structured information from academic answer keys.
 
 Below is the OCR text of an official Answer Key.
-Your goal is to extract the CORRECT model answer (or key points) for each question number listed below.
+Extract the CORRECT model answer (or key points) for each question number listed below.
 
 Questions to identify:
 ${questionList}
 
-OCR Text from Answer Key:
+OCR Text:
 """
-${ocrText}
+${truncatedText}
 """
 
-Return a JSON array of objects with the exact structure:
+Return ONLY a valid JSON array with EXACTLY this structure (no extra keys):
 [
   { "questionNo": 1, "modelAnswer": "..." },
   { "questionNo": 2, "modelAnswer": "..." }
 ]
-
-IMPORTANT:
-- Only return the JSON array, nothing else.
-- If an answer is multi-line, preserve the important key points.
-- If no answer is found for a question, use empty string "".
-`;
-
-  const text = await callOpenRouter(
-    'meta-llama/llama-3-8b-instruct:free',
-    [{ role: 'user', content: prompt }],
-    true
-  );
-
-  if (!text) return questions;
+Use "" for any question whose answer is not found.`;
 
   try {
-    const jsonStr = text.match(/\[[\s\S]*\]/)?.[0] || text;
-    const extracted = JSON.parse(jsonStr);
+    const text = await callOpenRouter(
+      'meta-llama/llama-3-8b-instruct:free',
+      [{ role: 'user', content: prompt }],
+      true
+    );
 
-    // Map the extracted answers back to the original questions array
+    const parsed = extractJson(text);
+    if (!Array.isArray(parsed)) {
+      logger.error('Answer key extraction: model did not return a JSON array.', text?.slice(0, 200));
+      return questions;
+    }
+
+    // Build a lookup: normalizedQNum → modelAnswer
+    const lookup = {};
+    for (const entry of parsed) {
+      const key = normalizeQNum(entry?.questionNo);
+      if (key && typeof entry?.modelAnswer === 'string') {
+        lookup[key] = entry.modelAnswer.trim();
+      }
+    }
+
     const updatedQuestions = questions.map(q => {
-      const match = extracted.find(e => Number(e.questionNo) === Number(q.questionNo));
+      const key = normalizeQNum(q.questionNo);
+      const hasManual = q.modelAnswer && q.modelAnswer.trim().length > 0;
       return {
         ...q,
-        modelAnswer: q.modelAnswer && q.modelAnswer.trim().length > 0
-          ? q.modelAnswer // Keep teacher's manual entry if it exists
-          : (match && match.modelAnswer ? match.modelAnswer.trim() : '')
+        modelAnswer: hasManual ? q.modelAnswer : (lookup[key] ?? ''),
       };
     });
 
+    logger.info(`Answer key extraction: updated ${Object.keys(lookup).length}/${questions.length} questions.`);
     return updatedQuestions;
   } catch (err) {
-    logger.error('Failed to parse auto-extracted answer key JSON:', err.message);
-    return questions;
+    logger.error('Answer key extraction failed:', err.message);
+    return questions; // Safe fallback — return originals unchanged
   }
 }
 
-module.exports = { segmentAnswerSheet, evaluateSingleAnswer, extractTextWithGemini, autoExtractAnswerKey };
+module.exports = {
+  extractTextWithGemini, // legacy name kept for submission.js compatibility
+  extractTextFromImage,  // preferred new name
+  segmentAnswerSheet,
+  evaluateSingleAnswer,
+  autoExtractAnswerKey,
+};
