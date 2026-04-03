@@ -5,7 +5,7 @@ const { extractTextFromPDF } = require('../services/pdfService');
 const cloudinary = require('../config/cloudinary');
 const fs = require('fs');
 const logger = require('../utils/logger');
-const { evaluateSingleAnswer } = require('../nlp/aiEvaluator');
+const { evaluateSingleAnswer, segmentAnswerSheet } = require('../nlp/aiEvaluator');
 const AnswerKey = require('../models/AnswerKey');
 const Evaluation = require('../models/Evaluation');
 const QuestionScore = require('../models/QuestionScore');
@@ -93,8 +93,14 @@ const uploadAnswerSheet = async (req, res) => {
         });
 
         // Use the extracted text to evaluate each question
+        // 1. First, segment the sheet using Gemini
+        const segments = await segmentAnswerSheet(extractedText, answerKey.questions);
+
         for (const q of answerKey.questions) {
-          const result = await evaluateSingleAnswer(extractedText, q.modelAnswer, q.maxMarks);
+          // Use segmented answer if available, else fallback to full text
+          const studentSegment = segments[String(q.questionNo)] || extractedText;
+          
+          const result = await evaluateSingleAnswer(studentSegment, q.modelAnswer, q.maxMarks, q.text);
           totalScore += result.marksObtained;
 
           await QuestionScore.create({
@@ -102,7 +108,7 @@ const uploadAnswerSheet = async (req, res) => {
             questionNo: q.questionNo,
             marksObtained: result.marksObtained,
             maxMarks: q.maxMarks,
-            studentAnswer: extractedText,
+            studentAnswer: studentSegment,
             feedback: result.feedback,
             suggestion: result.suggestion,
           });

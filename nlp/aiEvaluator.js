@@ -15,6 +15,39 @@ function getModel() {
 }
 
 /**
+ * NEW: OCR / Text extraction using Gemini 1.5 Flash (supports scanned PDFs)
+ */
+async function extractTextWithGemini(pdfBuffer) {
+  if (!process.env.GEMINI_API_KEY) {
+    logger.warn('No Gemini API key for OCR — falling back to metadata only.');
+    return '';
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    
+    // We send the PDF as a base64 part
+    const prompt = "Please read this PDF and extract all the handwritten or typed text exactly as it appears. If there are multiple pages, extract text from all of them in order.";
+    const result = await model.generateContent([
+      prompt,
+      {
+        inlineData: {
+          data: pdfBuffer.toString('base64'),
+          mimeType: 'application/pdf'
+        }
+      }
+    ]);
+
+    const text = result.response.text();
+    logger.info('Extracted text using Gemini Vision/OCR.');
+    return text;
+  } catch (err) {
+    logger.error('Gemini OCR failed:', err.message);
+    return '';
+  }
+}
+
+/**
  * PHASE 1 — Segment a student's answer sheet into per-question answers.
  *
  * Sends ONE Gemini call with:
@@ -166,4 +199,4 @@ Return ONLY a JSON object:
   }
 }
 
-module.exports = { segmentAnswerSheet, evaluateSingleAnswer };
+module.exports = { segmentAnswerSheet, evaluateSingleAnswer, extractTextWithGemini };

@@ -16,7 +16,11 @@ const morgan = require('morgan');
 
 // Middleware
 app.use(morgan('dev'));
-app.use(cors());
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve static files
 
@@ -34,6 +38,8 @@ app.use('/api/analytics',   require('./routes/analytics'));
 app.use('/api/export',      require('./routes/export'));
 app.use('/api/teacher',     require('./routes/teacher.routes'));
 app.use('/api/student',     require('./routes/student.routes'));
+app.use('/api/tests',       require('./routes/tests'));
+app.use('/api/questions',   require('./routes/questions'));
 
 // Keep original evaluate route as public utility
 app.use('/api/evaluate',    require('./routes/evaluate'));
