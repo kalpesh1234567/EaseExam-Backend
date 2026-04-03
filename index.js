@@ -6,6 +6,7 @@ const connectDB = require('./config/db');
 const swaggerDocs = require('./utils/swagger');
 const swaggerUi = require('swagger-ui-express');
 const logger = require('./utils/logger');
+const morgan = require('morgan');
 
 const app = express();
 
