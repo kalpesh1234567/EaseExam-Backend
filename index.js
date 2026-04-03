@@ -9,47 +9,58 @@ const logger = require('./utils/logger');
 
 const app = express();
 
-// Connect DB
-connectDB();
+// Connect DB and Start Server
+const startServer = async () => {
+  try {
+    await connectDB();
+    
+    const morgan = require('morgan');
 
-const morgan = require('morgan');
+    // Middleware
+    app.use(morgan('dev'));
+    const corsOptions = {
+      origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+      credentials: true,
+    };
+    app.use(cors(corsOptions));
+    app.use(express.json());
+    app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve static files
 
-// Middleware
-app.use(morgan('dev'));
-const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true,
+    // Swagger
+    app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
+    // Routes
+    app.use('/api/auth',        require('./routes/auth'));
+    app.use('/api/classrooms',  require('./routes/classrooms'));
+    app.use('/api/exams',       require('./routes/exams'));
+    app.use('/api/answer-keys', require('./routes/answerKey'));
+    app.use('/api/submissions', require('./routes/submissions'));
+    app.use('/api/results',     require('./routes/results'));
+    app.use('/api/analytics',   require('./routes/analytics'));
+    app.use('/api/export',      require('./routes/export'));
+    app.use('/api/teacher',     require('./routes/teacher.routes'));
+    app.use('/api/student',     require('./routes/student.routes'));
+    app.use('/api/tests',       require('./routes/tests'));
+    app.use('/api/questions',   require('./routes/questions'));
+
+    // Keep original evaluate route as public utility
+    app.use('/api/evaluate',    require('./routes/evaluate'));
+
+    app.get('/api/health', (req, res) => res.json({ status: 'ok', msg: 'ASAE Production API running' }));
+
+    app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
+
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => {
+      logger.info(`🚀 Server running on port ${PORT}`);
+      logger.info(`📚 Swagger docs at http://localhost:${PORT}/api/docs`);
+    });
+  } catch (err) {
+    logger.error('Failed to start server:', err);
+    process.exit(1);
+  }
 };
-app.use(cors(corsOptions));
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve static files
 
-// Swagger
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+startServer();
 
-// Routes
-app.use('/api/auth',        require('./routes/auth'));
-app.use('/api/classrooms',  require('./routes/classrooms'));
-app.use('/api/exams',       require('./routes/exams'));
-app.use('/api/answer-keys', require('./routes/answerKey'));
-app.use('/api/submissions', require('./routes/submissions'));
-app.use('/api/results',     require('./routes/results'));
-app.use('/api/analytics',   require('./routes/analytics'));
-app.use('/api/export',      require('./routes/export'));
-app.use('/api/teacher',     require('./routes/teacher.routes'));
-app.use('/api/student',     require('./routes/student.routes'));
-app.use('/api/tests',       require('./routes/tests'));
-app.use('/api/questions',   require('./routes/questions'));
 
-// Keep original evaluate route as public utility
-app.use('/api/evaluate',    require('./routes/evaluate'));
-
-app.get('/api/health', (req, res) => res.json({ status: 'ok', msg: 'ASAE Production API running' }));
-
-app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
-
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  logger.info(`🚀 Server running on port ${PORT}`);
-  logger.info(`📚 Swagger docs at http://localhost:${PORT}/api/docs`);
-});
