@@ -313,15 +313,17 @@ Output only the JSON object, no commentary.`;
 
 // ─── Phase 2: Evaluation ─────────────────────────────────────────────────────
 
-async function evaluateSingleAnswer(studentAnswerSegment, modelAnswer, maxMarks, questionText = '') {
+async function evaluateSingleAnswer(studentAnswerSegment, modelAnswer, maxMarks, questionText = '', questionNo = '') {
   // FIX 8: Stricter check — require real words, not just non-empty characters
   const wordCount = (studentAnswerSegment || '').trim().split(/\\s+/).filter(w => w.length > 1).length;
   const hasAnswer = wordCount >= 3;
 
+  const qLabel = questionNo ? `Question ${questionNo}` : 'this question';
+
   if (!hasAnswer) {
     return {
       marksObtained: 0,
-      feedback: 'No answer was found for this question in the submitted sheet.',
+      feedback: `For ${qLabel}, no answer was found in the submitted sheet.`,
       suggestion: 'Ensure your answers are clearly written and labelled with the correct question number.',
     };
   }
@@ -332,6 +334,7 @@ async function evaluateSingleAnswer(studentAnswerSegment, modelAnswer, maxMarks,
 
   const prompt = `You are an expert academic evaluator.
 
+${questionNo ? `Question Number: ${questionNo}` : ''}
 ${questionText ? `Question: "${questionText}"` : ''}
 Maximum marks: ${maxMarks}
 Model Answer: "${safeModel}"
@@ -350,8 +353,8 @@ Evaluation criteria:
 Return ONLY valid JSON with no extra text:
 {
   "marksObtained": <number between 0 and ${maxMarks}, decimals allowed like 2.5>,
-  "feedback": "<2 sentences: what was correct and what was wrong>",
-  "suggestion": "<one specific improvement tip>"
+  "feedback": "<2 sentences: clearly start by mentioning 'For Question ${questionNo || "this question"}', then state what was correct and what was wrong>",
+  "suggestion": "<one specific improvement tip for ${qLabel}>"
 }`;
 
   const defaultFail = {

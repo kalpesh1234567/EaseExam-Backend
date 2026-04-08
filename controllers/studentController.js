@@ -100,7 +100,7 @@ const uploadAnswerSheet = async (req, res) => {
           // Use segmented answer if available, else fallback to full text
           const studentSegment = segments[String(q.questionNo)] || extractedText;
           
-          const result = await evaluateSingleAnswer(studentSegment, q.modelAnswer, q.maxMarks, q.text);
+          const result = await evaluateSingleAnswer(studentSegment, q.modelAnswer, q.maxMarks, q.text, q.questionNo);
           totalScore += result.marksObtained;
 
           await QuestionScore.create({
