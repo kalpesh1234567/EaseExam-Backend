@@ -27,10 +27,11 @@ const storage = new CloudinaryStorage({
     else if (file.fieldname === 'questionPaper') folder = 'easeexam/papers';
 
     const isPDF = file.originalname.toLowerCase().endsWith('.pdf');
+    const ext = path.extname(file.originalname);
     return {
       folder: folder,
       resource_type: isPDF ? 'raw' : 'auto', 
-      public_id: `${Date.now()}-${file.originalname.split('.')[0]}`,
+      public_id: `${Date.now()}-${file.originalname.split('.')[0]}${isPDF ? ext : ''}`,
     };
   },
 });
