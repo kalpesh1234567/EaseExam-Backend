@@ -52,11 +52,11 @@ router.get('/teacher/:examId', auth, async (req, res) => {
  */
 router.get('/student/:examId', auth, async (req, res) => {
   try {
-    const sub = await StudentSubmission.findOne({ exam: req.params.examId, student: req.user.id }).populate('exam', 'title subject maxMarks');
+    const sub = await StudentSubmission.findOne({ exam: req.params.examId, student: req.user.id }).populate('exam', 'title subject maxMarks questionPaperUrl');
     if (!sub) return res.status(404).json({ message: 'No submission found' });
 
     if (sub.status !== 'evaluated') {
-      return res.json({ status: sub.status, errorMsg: sub.errorMsg, exam: sub.exam });
+      return res.json({ status: sub.status, errorMsg: sub.errorMsg, exam: sub.exam, fileUrl: sub.fileUrl });
     }
 
     const evalDoc = await Evaluation.findOne({ submission: sub._id });
@@ -65,6 +65,7 @@ router.get('/student/:examId', auth, async (req, res) => {
     res.json({
       status: sub.status,
       exam: sub.exam,
+      fileUrl: sub.fileUrl,
       evaluation: evalDoc,
       questionScores: qScores
     });
