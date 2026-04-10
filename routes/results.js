@@ -30,6 +30,7 @@ router.get('/teacher/:examId', auth, async (req, res) => {
       const evalDoc = evaluations.find(e => e.submission.toString() === sub._id.toString());
       return {
         student: sub.student,
+        submissionId: sub._id,
         status: sub.status,
         fileUrl: getInlinePdfUrl(sub.fileUrl),
         evaluation: evalDoc || null
@@ -60,6 +61,7 @@ router.get('/student/:examId', auth, async (req, res) => {
       return res.json({
         status: sub.status,
         errorMsg: sub.errorMsg,
+        submissionId: sub._id,
         exam: {
           ...sub.exam.toObject(),
           questionPaperUrl: getInlinePdfUrl(sub.exam.questionPaperUrl)
@@ -73,6 +75,7 @@ router.get('/student/:examId', auth, async (req, res) => {
 
     res.json({
       status: sub.status,
+      submissionId: sub._id,
       exam: {
         ...sub.exam.toObject(),
         questionPaperUrl: getInlinePdfUrl(sub.exam.questionPaperUrl)

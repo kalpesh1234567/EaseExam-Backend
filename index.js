@@ -61,6 +61,7 @@ const startServer = async () => {
 
     // Keep original evaluate route as public utility
     app.use('/api/evaluate',    require('./routes/evaluate'));
+    app.use('/api/files',       require('./routes/files')); // Secure PDF proxy
 
     app.get('/api/health', (req, res) => res.json({ status: 'ok', msg: 'ASAE Production API running' }));
 
