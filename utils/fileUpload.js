@@ -30,8 +30,8 @@ const storage = new CloudinaryStorage({
     const ext = path.extname(file.originalname);
     return {
       folder: folder,
-      resource_type: isPDF ? 'raw' : 'auto', 
-      public_id: `${Date.now()}-${file.originalname.split('.')[0]}${isPDF ? ext : ''}`,
+      resource_type: 'auto', 
+      public_id: `${Date.now()}-${file.originalname.split('.')[0]}`,
     };
   },
 });
