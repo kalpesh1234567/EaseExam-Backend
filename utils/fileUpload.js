@@ -53,19 +53,13 @@ const upload = multer({
 });
 
 /**
- * Convert a Cloudinary RAW PDF URL to one that opens inline in the browser.
- * Cloudinary's `raw` resource type serves files as application/octet-stream
- * by default, which triggers a download. Adding `fl_attachment:false` forces
- * the browser to render the file inline.
- *
- * Works for both old-style (res.cloudinary.com) and new-style URLs.
+ * NOTE: Cloudinary `raw` resources do NOT support URL transformations.
+ * Injecting fl_attachment:false into a raw URL causes 401 Unauthorized.
+ * PDF inline-viewing is handled on the frontend via Google Docs Viewer.
+ * This function is kept as a no-op so callers remain unchanged.
  */
 function getInlinePdfUrl(url) {
-  if (!url || !url.includes('res.cloudinary.com')) return url;
-  // Already has the flag — return as-is
-  if (url.includes('fl_attachment')) return url;
-  // Insert transformation flag after /upload/ or /raw/upload/
-  return url.replace(/(\/upload\/)/, '$1fl_attachment:false/');
+  return url || '';
 }
 
 module.exports = upload;
