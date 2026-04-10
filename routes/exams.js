@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const upload = require('../utils/fileUpload');
+const { getInlinePdfUrl } = require('../utils/fileUpload');
 const Exam = require('../models/Exam');
 const Classroom = require('../models/Classroom');
 const Enrollment = require('../models/Enrollment');
@@ -23,7 +24,13 @@ router.get('/', auth, async (req, res) => {
       .populate('teacher', 'firstName lastName')
       .populate('classroom', 'name')
       .sort('-createdAt');
-    res.json(exams);
+    // Transform Cloudinary raw PDF URLs to inline-viewable URLs
+    const examsWithInlineUrls = exams.map(e => {
+      const obj = e.toObject();
+      if (obj.questionPaperUrl) obj.questionPaperUrl = getInlinePdfUrl(obj.questionPaperUrl);
+      return obj;
+    });
+    res.json(examsWithInlineUrls);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -92,7 +99,7 @@ router.get('/:id/submissions-status', auth, async (req, res) => {
         hasSubmitted: !!sub,
         status: sub ? sub.status : 'not_submitted',
         submissionId: sub ? sub._id : null,
-        fileUrl: sub ? sub.fileUrl : null,
+        fileUrl: sub ? getInlinePdfUrl(sub.fileUrl) : null,
         updatedAt: sub ? sub.updatedAt : null
       };
     });
@@ -115,7 +122,7 @@ router.post('/:id/question-paper', auth, upload.single('questionPaper'), async (
     exam.questionPaperUrl = req.file.path; // Cloudinary returns the full URL in path
     await exam.save();
 
-    res.json({ message: 'Question paper uploaded successfully', questionPaperUrl: exam.questionPaperUrl });
+    res.json({ message: 'Question paper uploaded successfully', questionPaperUrl: getInlinePdfUrl(exam.questionPaperUrl) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

@@ -52,4 +52,21 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
 });
 
+/**
+ * Convert a Cloudinary RAW PDF URL to one that opens inline in the browser.
+ * Cloudinary's `raw` resource type serves files as application/octet-stream
+ * by default, which triggers a download. Adding `fl_attachment:false` forces
+ * the browser to render the file inline.
+ *
+ * Works for both old-style (res.cloudinary.com) and new-style URLs.
+ */
+function getInlinePdfUrl(url) {
+  if (!url || !url.includes('res.cloudinary.com')) return url;
+  // Already has the flag — return as-is
+  if (url.includes('fl_attachment')) return url;
+  // Insert transformation flag after /upload/ or /raw/upload/
+  return url.replace(/(\/upload\/)/, '$1fl_attachment:false/');
+}
+
 module.exports = upload;
+module.exports.getInlinePdfUrl = getInlinePdfUrl;

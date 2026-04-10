@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const { getInlinePdfUrl } = require('../utils/fileUpload');
 const Exam = require('../models/Exam');
 const StudentSubmission = require('../models/StudentSubmission');
 const Evaluation = require('../models/Evaluation');
@@ -30,7 +31,7 @@ router.get('/teacher/:examId', auth, async (req, res) => {
       return {
         student: sub.student,
         status: sub.status,
-        fileUrl: sub.fileUrl,
+        fileUrl: getInlinePdfUrl(sub.fileUrl),
         evaluation: evalDoc || null
       };
     });
@@ -56,7 +57,15 @@ router.get('/student/:examId', auth, async (req, res) => {
     if (!sub) return res.status(404).json({ message: 'No submission found' });
 
     if (sub.status !== 'evaluated') {
-      return res.json({ status: sub.status, errorMsg: sub.errorMsg, exam: sub.exam, fileUrl: sub.fileUrl });
+      return res.json({
+        status: sub.status,
+        errorMsg: sub.errorMsg,
+        exam: {
+          ...sub.exam.toObject(),
+          questionPaperUrl: getInlinePdfUrl(sub.exam.questionPaperUrl)
+        },
+        fileUrl: getInlinePdfUrl(sub.fileUrl)
+      });
     }
 
     const evalDoc = await Evaluation.findOne({ submission: sub._id });
@@ -64,8 +73,11 @@ router.get('/student/:examId', auth, async (req, res) => {
 
     res.json({
       status: sub.status,
-      exam: sub.exam,
-      fileUrl: sub.fileUrl,
+      exam: {
+        ...sub.exam.toObject(),
+        questionPaperUrl: getInlinePdfUrl(sub.exam.questionPaperUrl)
+      },
+      fileUrl: getInlinePdfUrl(sub.fileUrl),
       evaluation: evalDoc,
       questionScores: qScores
     });
