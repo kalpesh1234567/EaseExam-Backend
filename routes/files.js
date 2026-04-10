@@ -39,39 +39,62 @@ function extractPublicId(url) {
   return match ? match[1] : null;
 }
 
-/**
- * Generate a short-lived (5-minute) signed Cloudinary URL.
- * This bypasses Restricted Delivery and works even on locked-down accounts.
- */
-function buildSignedUrl(rawUrl) {
-  const publicId = extractPublicId(rawUrl);
-  if (!publicId) return rawUrl; // fallback
 
-  return cloudinary.url(publicId, {
-    resource_type: 'raw',
-    type:          'upload',
-    sign_url:      true,
-    secure:        true,
-    expires_at:    Math.floor(Date.now() / 1000) + 300, // expires in 5 min
-  });
+
+/**
+ * Strip any Cloudinary transformation flags that may have been accidentally
+ * embedded in stored URLs (e.g. fl_attachment:false from an earlier bug).
+ *
+ * Before: https://res.cloudinary.com/x/raw/upload/fl_attachment:false/v123/x.pdf
+ * After:  https://res.cloudinary.com/x/raw/upload/v123/x.pdf
+ */
+function cleanCloudinaryUrl(url) {
+  if (!url) return url;
+  // Remove any flag-like segment between /upload/ and the version or public_id
+  // Flags look like  fl_something:value  or  f_something
+  return url.replace(/\/upload\/((?:[a-z_]+:[^/]+\/)+)/, '/upload/');
 }
 
 /**
- * Fetch the PDF from Cloudinary (via signed URL) and pipe it to the response.
+ * Fetch the PDF from Cloudinary and pipe it to the response.
+ *
+ * Strategy:
+ *   1. Clean the URL (strip any erroneously stored transformation flags).
+ *   2. Try a direct fetch — works when Cloudinary is publicly accessible.
+ *   3. If Cloudinary returns 401 (Restricted Delivery), generate a short-lived
+ *      signed URL and retry once.
  */
-async function streamPdf(cloudinaryUrl, filename, res) {
-  const signedUrl = buildSignedUrl(cloudinaryUrl);
+async function streamPdf(rawUrl, filename, res) {
+  const cleanUrl = cleanCloudinaryUrl(rawUrl);
   logger.info(`[Files] Proxying PDF: ${filename}`);
 
-  const upstream = await axios.get(signedUrl, {
-    responseType: 'stream',
-    timeout: 20000,
-  });
+  const headers = { 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${filename}"`, 'Cache-Control': 'private, max-age=300' };
 
-  res.setHeader('Content-Type',        'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-  res.setHeader('Cache-Control',       'private, max-age=300');
-  upstream.data.pipe(res);
+  try {
+    // ── Attempt 1: direct public URL ────────────────────────────────────────
+    const upstream = await axios.get(cleanUrl, { responseType: 'stream', timeout: 20000 });
+    Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
+    upstream.data.pipe(res);
+  } catch (directErr) {
+    if (directErr.response?.status !== 401) throw directErr; // not an auth issue — rethrow
+
+    // ── Attempt 2: signed URL (Cloudinary Restricted Delivery) ────────────
+    logger.warn('[Files] Direct fetch returned 401 — retrying with signed URL');
+    const publicId = extractPublicId(cleanUrl);
+    if (!publicId) throw new Error('Could not determine Cloudinary public_id for signing');
+
+    const signedUrl = cloudinary.url(publicId, {
+      resource_type: 'raw',
+      type:          'upload',
+      sign_url:      true,
+      secure:        true,
+      expires_at:    Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const upstream2 = await axios.get(signedUrl, { responseType: 'stream', timeout: 20000 });
+    Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
+    upstream2.data.pipe(res);
+  }
 }
 
 // ─── GET /api/files/question-paper/:examId ────────────────────────────────────
