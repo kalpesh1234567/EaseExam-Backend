@@ -46,15 +46,22 @@ function detectResourceType(url) {
 
 /**
  * Extract the Cloudinary public_id from a stored URL.
- * e.g. https://res.cloudinary.com/cloud/raw/upload/v123456/easeexam/papers/test.pdf
- *   → easeexam/papers/test.pdf
- * e.g. https://res.cloudinary.com/cloud/image/upload/v123456/easeexam/papers/test.pdf
+ * Returns the FULL path after /upload/v123.../ including any file extension.
+ *
+ * e.g. https://res.cloudinary.com/cloud/raw/upload/v123/easeexam/papers/test.pdf
  *   → easeexam/papers/test.pdf
  */
 function extractPublicId(url) {
-  // Match everything after /upload/v12345/ (or /upload/ without version)
   const match = url.match(/\/upload\/(?:v\d+\/)?(.+)$/);
   return match ? match[1] : null;
+}
+
+/**
+ * Strip file extension from a public_id.
+ *   easeexam/papers/test.pdf → easeexam/papers/test
+ */
+function stripExtension(publicId) {
+  return publicId.replace(/\.[^/.]+$/, '');
 }
 
 /**
@@ -68,9 +75,17 @@ function cleanCloudinaryUrl(url) {
 
 /**
  * Generate a signed Cloudinary URL for a given public_id and resource type.
+ *
+ * IMPORTANT: Cloudinary public_id rules differ by resource_type:
+ *   - 'raw':   extension IS part of the public_id  (e.g. "folder/file.pdf")
+ *   - 'image': extension is NOT part of the public_id (e.g. "folder/file")
+ *   - 'auto':  same as 'image' — extension is a format hint
  */
 function makeSignedUrl(publicId, resourceType) {
-  return cloudinary.url(publicId, {
+  // For image/auto, strip the file extension from the public_id
+  const effectiveId = (resourceType === 'raw') ? publicId : stripExtension(publicId);
+
+  return cloudinary.url(effectiveId, {
     resource_type: resourceType,
     type:          'upload',
     sign_url:      true,
@@ -85,12 +100,20 @@ function makeSignedUrl(publicId, resourceType) {
 async function tryFetch(url, label) {
   try {
     const response = await axios.get(url, { responseType: 'stream', timeout: 20000 });
-    logger.info(`[Files] ${label} succeeded (${response.status})`);
+    logger.info(`[Files] ✅ ${label} succeeded (${response.status})`);
     return response;
   } catch (err) {
-    logger.warn(`[Files] ${label} failed: ${err.response?.status || err.message}`);
+    logger.warn(`[Files] ❌ ${label} failed: ${err.response?.status || err.message}`);
     return null;
   }
+}
+
+/**
+ * Pipe a successful upstream response to the client.
+ */
+function pipeToResponse(upstream, headers, res) {
+  Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
+  upstream.data.pipe(res);
 }
 
 /**
@@ -98,9 +121,8 @@ async function tryFetch(url, label) {
  *
  * Strategy (tries in order, stops at first success):
  *   1. Direct fetch of the stored/cleaned URL
- *   2. Signed URL using the detected resource_type from the URL
- *   3. Signed URL with resource_type 'image' (fallback for mismatched uploads)
- *   4. Signed URL with resource_type 'raw'   (last resort)
+ *   2. Direct URL with swapped resource types (raw↔image↔auto)
+ *   3. Signed URLs with each resource type (using correct public_id per type)
  */
 async function streamPdf(rawUrl, filename, res) {
   const cleanUrl     = cleanCloudinaryUrl(rawUrl);
@@ -109,7 +131,8 @@ async function streamPdf(rawUrl, filename, res) {
 
   logger.info(`[Files] Proxying PDF: ${filename}`);
   logger.info(`[Files]   URL: ${cleanUrl}`);
-  logger.info(`[Files]   Public ID: ${publicId}`);
+  logger.info(`[Files]   Public ID (full): ${publicId}`);
+  logger.info(`[Files]   Public ID (no ext): ${publicId ? stripExtension(publicId) : 'N/A'}`);
   logger.info(`[Files]   Detected resource_type: ${detectedType}`);
 
   const headers = {
@@ -118,67 +141,38 @@ async function streamPdf(rawUrl, filename, res) {
     'Cache-Control':       'private, max-age=300',
   };
 
-  // ── Attempt 1: Direct public URL ──────────────────────────────────────────
-  let upstream = await tryFetch(cleanUrl, 'Direct fetch');
-  if (upstream) {
-    Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
-    upstream.data.pipe(res);
-    return;
+  // ── Attempt 1: Direct public URL (as stored) ─────────────────────────────
+  let upstream = await tryFetch(cleanUrl, 'Direct fetch (original)');
+  if (upstream) { pipeToResponse(upstream, headers, res); return; }
+
+  // ── Attempt 2: Direct URLs with swapped resource type ─────────────────────
+  // The stored URL might say /raw/upload/ but the file actually lives under /image/upload/
+  const allTypes = ['image', 'raw', 'auto'];
+  for (const rt of allTypes) {
+    if (rt === detectedType) continue; // already tried via original URL
+    const altUrl = cleanUrl.replace(
+      /res\.cloudinary\.com\/([^/]+)\/(raw|image|video|auto)\/upload\//,
+      `res.cloudinary.com/$1/${rt}/upload/`
+    );
+    upstream = await tryFetch(altUrl, `Direct (${rt})`);
+    if (upstream) { pipeToResponse(upstream, headers, res); return; }
   }
 
   if (!publicId) {
     throw new Error('Could not determine Cloudinary public_id from URL: ' + cleanUrl);
   }
 
-  // ── Attempt 2: Signed URL with detected resource type ─────────────────────
-  const signedUrl1 = makeSignedUrl(publicId, detectedType);
-  upstream = await tryFetch(signedUrl1, `Signed (${detectedType})`);
-  if (upstream) {
-    Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
-    upstream.data.pipe(res);
-    return;
-  }
-
-  // ── Attempt 3: Signed URL with 'image' type (common for PDF-as-image) ────
-  if (detectedType !== 'image') {
-    const signedUrl2 = makeSignedUrl(publicId, 'image');
-    upstream = await tryFetch(signedUrl2, 'Signed (image)');
-    if (upstream) {
-      Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
-      upstream.data.pipe(res);
-      return;
-    }
-  }
-
-  // ── Attempt 4: Signed URL with 'raw' type ─────────────────────────────────
-  if (detectedType !== 'raw') {
-    const signedUrl3 = makeSignedUrl(publicId, 'raw');
-    upstream = await tryFetch(signedUrl3, 'Signed (raw)');
-    if (upstream) {
-      Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
-      upstream.data.pipe(res);
-      return;
-    }
-  }
-
-  // ── Attempt 5: Try direct URL swapping resource type in the URL ───────────
-  // If the stored URL says /raw/upload/ but really lives under /image/upload/
-  const altTypes = ['image', 'raw', 'auto'].filter(t => t !== detectedType);
-  for (const alt of altTypes) {
-    const altUrl = cleanUrl.replace(
-      /res\.cloudinary\.com\/([^/]+)\/(raw|image|video|auto)\/upload\//,
-      `res.cloudinary.com/$1/${alt}/upload/`
-    );
-    upstream = await tryFetch(altUrl, `Direct (${alt})`);
-    if (upstream) {
-      Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
-      upstream.data.pipe(res);
-      return;
-    }
+  // ── Attempt 3: Signed URLs with each resource type ────────────────────────
+  // makeSignedUrl automatically handles extension stripping per resource type
+  for (const rt of allTypes) {
+    const signedUrl = makeSignedUrl(publicId, rt);
+    logger.info(`[Files]   Trying signed URL (${rt}): ${signedUrl}`);
+    upstream = await tryFetch(signedUrl, `Signed (${rt})`);
+    if (upstream) { pipeToResponse(upstream, headers, res); return; }
   }
 
   // ── All attempts failed ───────────────────────────────────────────────────
-  throw new Error(`All fetch strategies exhausted for public_id: ${publicId}`);
+  throw new Error(`All fetch strategies exhausted for: ${cleanUrl}`);
 }
 
 // ─── GET /api/files/question-paper/:examId ────────────────────────────────────
