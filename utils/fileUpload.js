@@ -27,12 +27,13 @@ const storage = new CloudinaryStorage({
     else if (file.fieldname === 'questionPaper') folder = 'easeexam/papers';
 
     const isPDF = file.originalname.toLowerCase().endsWith('.pdf');
-    // Free Tier restricts files ending in .pdf!
-    // We upload as 'raw' but DELIBERATELY omit the extension in public_id.
-    // This allows delivery via Cloudinary URLs without hitting the 401 PDF block.
+    // Free Tier restricts 'raw' resource delivery for PDFs (returns 401).
+    // Using 'auto' lets Cloudinary pick the best delivery type, which
+    // treats PDFs as images and avoids the restricted delivery block.
+    // We still omit the .pdf extension in public_id as a safeguard.
     return {
       folder: folder,
-      resource_type: isPDF ? 'raw' : 'auto', 
+      resource_type: 'auto',
       public_id: `${Date.now()}-${file.originalname.split('.')[0]}`,
     };
   },
